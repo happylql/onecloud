@@ -43,7 +43,6 @@ type EvalContext struct {
 	StartTime          time.Time
 	EndTime            time.Time
 	Rule               *Rule
-	//RuleDescription    *RuleDescription
 
 	NoDataFound    bool
 	PrevAlertState monitor.AlertStateType
@@ -52,19 +51,16 @@ type EvalContext struct {
 	UserCred mcclient.TokenCredential
 }
 
-type RuleDescription struct {
-	monitor.AlertRecordRule
-}
-
 // NewEvalContext is the EvalContext constructor.
 func NewEvalContext(alertCtx context.Context, userCred mcclient.TokenCredential, rule *Rule) *EvalContext {
 	return &EvalContext{
-		Ctx:            alertCtx,
-		UserCred:       userCred,
-		StartTime:      time.Now(),
-		Rule:           rule,
-		EvalMatches:    make([]*monitor.EvalMatch, 0),
-		PrevAlertState: rule.State,
+		Ctx:                alertCtx,
+		UserCred:           userCred,
+		StartTime:          time.Now(),
+		Rule:               rule,
+		EvalMatches:        make([]*monitor.EvalMatch, 0),
+		AlertOkEvalMatches: make([]*monitor.EvalMatch, 0),
+		PrevAlertState:     rule.State,
 	}
 }
 
@@ -197,8 +193,11 @@ func getNewStateInternal(c *EvalContext) monitor.AlertStateType {
 	return monitor.AlertStateOK
 }
 
-func (c *EvalContext) GetNotificationTemplateConfig() monitor.NotificationTemplateConfig {
+func (c *EvalContext) GetNotificationTemplateConfig(matches []*monitor.EvalMatch) monitor.NotificationTemplateConfig {
 	desc := c.Rule.Message
+	if len(c.Rule.TriggeredMessages) > 0 {
+		desc = strings.Join(c.Rule.TriggeredMessages, " ")
+	}
 	if c.Error != nil {
 		if desc != "" {
 			desc += "\n"
@@ -209,14 +208,15 @@ func (c *EvalContext) GetNotificationTemplateConfig() monitor.NotificationTempla
 	return monitor.NotificationTemplateConfig{
 		Title:        c.GetNotificationTitle(),
 		Name:         c.Rule.Name,
-		ResourceName: c.GetResourceNameOfMathes(nil),
-		Matches:      c.GetEvalMatches(),
-		StartTime:    c.StartTime.In(tz).Format("2006-01-02 15:04:05"),
-		EndTime:      c.EndTime.In(tz).Format("2006-01-02 15:04:05"),
-		Description:  desc,
-		Level:        c.Rule.Level,
-		NoDataFound:  c.NoDataFound,
-		WebUrl:       c.GetCallbackURLPrefix(),
+		ResourceName: c.GetResourceNameOfMatches(matches),
+		Matches:      matches,
+		//Matches:      c.GetEvalMatches(),
+		StartTime:   c.StartTime.In(tz).Format("2006-01-02 15:04:05"),
+		EndTime:     c.EndTime.In(tz).Format("2006-01-02 15:04:05"),
+		Description: desc,
+		Level:       c.Rule.Level,
+		NoDataFound: c.NoDataFound,
+		WebUrl:      c.GetCallbackURLPrefix(),
 	}
 }
 
@@ -241,19 +241,30 @@ func (c *EvalContext) GetEvalMatches() []monitor.EvalMatch {
 	return ret
 }
 
-func (c *EvalContext) GetResourceNameOfMathes(matches []monitor.EvalMatch) string {
+func (c *EvalContext) GetResourceNameOfMatches(matches []*monitor.EvalMatch) string {
 	names := strings.Builder{}
-	if matches == nil {
-		matches = c.GetEvalMatches()
-	}
 	for i, match := range matches {
 		if name, ok := match.Tags["name"]; ok {
-			names.WriteString(name)
-			names.WriteString(fmt.Sprintf("(%s)", match.ValueStr))
+			names.WriteString(fmt.Sprintf("%s.%s(%s)", name, match.Metric, match.ValueStr))
 			if i < len(matches)-1 {
-				names.WriteString("、")
+				names.WriteString(", ")
 			}
 		}
 	}
 	return names.String()
+}
+
+func (c *EvalContext) GetRecoveredMatches() []*monitor.EvalMatch {
+	ret := make([]*monitor.EvalMatch, 0)
+	for i := range c.AlertOkEvalMatches {
+		m := c.AlertOkEvalMatches[i]
+		if m.IsRecovery {
+			ret = append(ret, m)
+		}
+	}
+	return ret
+}
+
+func (c *EvalContext) HasRecoveredMatches() bool {
+	return len(c.GetRecoveredMatches()) != 0
 }

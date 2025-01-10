@@ -59,6 +59,49 @@ func (self *SKVMHostDriver) GetHypervisor() string {
 	return api.HYPERVISOR_KVM
 }
 
+func (self *SKVMHostDriver) GetProvider() string {
+	return api.CLOUD_PROVIDER_ONECLOUD
+}
+
+func (self *SKVMHostDriver) validateGPFS(ctx context.Context, userCred mcclient.TokenCredential, host *models.SHost, input api.HostStorageCreateInput) (api.HostStorageCreateInput, error) {
+	header := http.Header{}
+	header.Set(mcclient.AUTH_TOKEN, userCred.GetTokenString())
+	header.Set(mcclient.REGION_VERSION, "v2")
+	params := jsonutils.NewDict()
+	params.Set("mount_point", jsonutils.NewString(input.MountPoint))
+	urlStr := fmt.Sprintf("%s/storages/is-mount-point?%s", host.ManagerUri, params.QueryString())
+	_, res, err := httputils.JSONRequest(httputils.GetDefaultClient(), ctx, "GET", urlStr, header, nil, false)
+	if err != nil {
+		return input, err
+	}
+	if !jsonutils.QueryBoolean(res, "is_mount_point", false) {
+		return input, httperrors.NewBadRequestError("%s is not mount point %s", input.MountPoint, res)
+	}
+	urlStr = fmt.Sprintf("%s/storages/is-local-mount-point?%s", host.ManagerUri, params.QueryString())
+	_, res, err = httputils.JSONRequest(httputils.GetDefaultClient(), ctx, "GET", urlStr, header, nil, false)
+	if err != nil {
+		return input, err
+	}
+	if jsonutils.QueryBoolean(res, "is_local_mount_point", false) {
+		return input, httperrors.NewBadRequestError("%s is local storage mount point", input.MountPoint)
+	}
+	return input, nil
+}
+
+func (self *SKVMHostDriver) validateSharedLVM(ctx context.Context, userCred mcclient.TokenCredential, host *models.SHost, storage *models.SStorage, input api.HostStorageCreateInput) (api.HostStorageCreateInput, error) {
+	header := http.Header{}
+	header.Set(mcclient.AUTH_TOKEN, userCred.GetTokenString())
+	header.Set(mcclient.REGION_VERSION, "v2")
+	params := jsonutils.NewDict()
+	params.Set("vg_name", jsonutils.NewString(input.MountPoint))
+	urlStr := fmt.Sprintf("%s/storages/is-vg-exist?%s", host.ManagerUri, params.QueryString())
+	_, _, err := httputils.JSONRequest(httputils.GetDefaultClient(), ctx, "GET", urlStr, header, nil, false)
+	if err != nil {
+		return input, err
+	}
+	return input, nil
+}
+
 func (self *SKVMHostDriver) ValidateAttachStorage(ctx context.Context, userCred mcclient.TokenCredential, host *models.SHost, storage *models.SStorage, input api.HostStorageCreateInput) (api.HostStorageCreateInput, error) {
 	if !utils.IsInStringArray(storage.StorageType, append([]string{api.STORAGE_LOCAL, api.STORAGE_NVME_PT, api.STORAGE_NVME, api.STORAGE_LVM}, api.SHARED_STORAGE...)) {
 		return input, httperrors.NewUnsupportOperationError("Unsupport attach %s storage for %s host", storage.StorageType, host.HostType)
@@ -84,28 +127,22 @@ func (self *SKVMHostDriver) ValidateAttachStorage(ctx context.Context, userCred 
 			return input, httperrors.NewInvalidStatusError("Attach nfs storage require host status is online")
 		}
 		if storage.StorageType == api.STORAGE_GPFS {
-			header := http.Header{}
-			header.Set(mcclient.AUTH_TOKEN, userCred.GetTokenString())
-			header.Set(mcclient.REGION_VERSION, "v2")
-			params := jsonutils.NewDict()
-			params.Set("mount_point", jsonutils.NewString(input.MountPoint))
-			urlStr := fmt.Sprintf("%s/storages/is-mount-point?%s", host.ManagerUri, params.QueryString())
-			_, res, err := httputils.JSONRequest(httputils.GetDefaultClient(), ctx, "GET", urlStr, header, nil, false)
-			if err != nil {
-				return input, err
-			}
-			if !jsonutils.QueryBoolean(res, "is_mount_point", false) {
-				return input, httperrors.NewBadRequestError("%s is not mount point %s", input.MountPoint, res)
-			}
-			urlStr = fmt.Sprintf("%s/storages/is-local-mount-point?%s", host.ManagerUri, params.QueryString())
-			_, res, err = httputils.JSONRequest(httputils.GetDefaultClient(), ctx, "GET", urlStr, header, nil, false)
-			if err != nil {
-				return input, err
-			}
-			if jsonutils.QueryBoolean(res, "is_local_mount_point", false) {
-				return input, httperrors.NewBadRequestError("%s is local storage mount point", input.MountPoint)
-			}
+			return self.validateGPFS(ctx, userCred, host, input)
 		}
+	} else if storage.StorageType == api.STORAGE_CLVM {
+		vgName, _ := storage.StorageConf.GetString("clvm_vg_name")
+		if vgName == "" {
+			return input, httperrors.NewInternalServerError("storage has no clvm_vg_name")
+		}
+		input.MountPoint = vgName
+		return self.validateSharedLVM(ctx, userCred, host, storage, input)
+	} else if storage.StorageType == api.STORAGE_SLVM {
+		vgName, _ := storage.StorageConf.GetString("slvm_vg_name")
+		if vgName == "" {
+			return input, httperrors.NewInternalServerError("storage has no slvm_vg_name")
+		}
+		input.MountPoint = vgName
+		return self.validateSharedLVM(ctx, userCred, host, storage, input)
 	}
 	return input, nil
 }
@@ -215,7 +252,7 @@ func (self *SKVMHostDriver) CheckAndSetCacheImage(ctx context.Context, userCred 
 	return nil
 }
 
-func (self *SKVMHostDriver) RequestUncacheImage(ctx context.Context, host *models.SHost, storageCache *models.SStoragecache, task taskman.ITask) error {
+func (self *SKVMHostDriver) RequestUncacheImage(ctx context.Context, host *models.SHost, storageCache *models.SStoragecache, task taskman.ITask, deactivateImage bool) error {
 	type contentStruct struct {
 		ImageId        string
 		StoragecacheId string
@@ -235,6 +272,9 @@ func (self *SKVMHostDriver) RequestUncacheImage(ctx context.Context, host *model
 
 	body := jsonutils.NewDict()
 	body.Add(jsonutils.Marshal(&content), "disk")
+	if deactivateImage {
+		body.Add(jsonutils.JSONTrue, "deactivate_image")
+	}
 
 	header := task.GetTaskRequestHeader()
 
@@ -254,7 +294,7 @@ func (self *SKVMHostDriver) RequestAllocateDiskOnStorage(ctx context.Context, us
 		}
 		snapshot := snapObj.(*models.SSnapshot)
 		snapshotStorage := models.StorageManager.FetchStorageById(snapshot.StorageId)
-		if snapshotStorage.StorageType == api.STORAGE_LOCAL {
+		if snapshotStorage.StorageType == api.STORAGE_LOCAL || snapshotStorage.StorageType == api.STORAGE_LVM {
 			snapshotHost, err := snapshotStorage.GetMasterHost()
 			if err != nil {
 				return errors.Wrapf(err, "GetMasterHost")
@@ -288,7 +328,7 @@ func (self *SKVMHostDriver) RequestRebuildDiskOnStorage(ctx context.Context, hos
 	return self.RequestAllocateDiskOnStorage(ctx, task.GetUserCred(), host, storage, disk, task, input)
 }
 
-func (self *SKVMHostDriver) RequestDeallocateDiskOnHost(ctx context.Context, host *models.SHost, storage *models.SStorage, disk *models.SDisk, task taskman.ITask) error {
+func (self *SKVMHostDriver) RequestDeallocateDiskOnHost(ctx context.Context, host *models.SHost, storage *models.SStorage, disk *models.SDisk, cleanSnapshots bool, task taskman.ITask) error {
 	log.Infof("Deallocating disk on host %s", host.GetName())
 	header := task.GetTaskRequestHeader()
 
@@ -297,6 +337,7 @@ func (self *SKVMHostDriver) RequestDeallocateDiskOnHost(ctx context.Context, hos
 	if flatPath := disk.GetMetadata(ctx, api.DISK_META_REMOTE_ACCESS_PATH, nil); flatPath != "" {
 		body.Set("esxi_flat_file_path", jsonutils.NewString(flatPath))
 	}
+	body.Set("clean_snapshots", jsonutils.NewBool(cleanSnapshots))
 	_, err := host.Request(ctx, task.GetUserCred(), "POST", url, header, body)
 	if err != nil {
 		if errors.Cause(err) == cloudprovider.ErrNotFound {
@@ -339,6 +380,22 @@ func (self *SKVMHostDriver) RequestResizeDiskOnHost(ctx context.Context, host *m
 	return err
 }
 
+func (self *SKVMHostDriver) RequestDiskSrcMigratePrepare(ctx context.Context, host *models.SHost, disk *models.SDisk, task taskman.ITask) (jsonutils.JSONObject, error) {
+	body := jsonutils.NewDict()
+	destUrl := fmt.Sprintf("/disks/%s/src-migrate-prepare/%s", disk.StorageId, disk.Id)
+
+	header := task.GetTaskRequestHeader()
+	return host.Request(ctx, task.GetUserCred(), "POST", destUrl, header, body)
+}
+
+func (self *SKVMHostDriver) RequestDiskMigrate(ctx context.Context, targetHost *models.SHost, targetStorage *models.SStorage, disk *models.SDisk, task taskman.ITask, body *jsonutils.JSONDict) error {
+	destUrl := fmt.Sprintf("/disks/%s/migrate/%s", targetStorage.Id, disk.Id)
+
+	header := task.GetTaskRequestHeader()
+	_, err := targetHost.Request(ctx, task.GetUserCred(), "POST", destUrl, header, body)
+	return err
+}
+
 func (self *SKVMHostDriver) RequestPrepareSaveDiskOnHost(ctx context.Context, host *models.SHost, disk *models.SDisk, imageId string, task taskman.ITask) error {
 	body := jsonutils.NewDict()
 	body.Add(jsonutils.Marshal(map[string]string{"image_id": imageId}), "disk")
@@ -374,14 +431,23 @@ func (self *SKVMHostDriver) RequestSaveUploadImageOnHost(ctx context.Context, ho
 	return err
 }
 
-func (self *SKVMHostDriver) RequestDeleteSnapshotsWithStorage(ctx context.Context, host *models.SHost, snapshot *models.SSnapshot, task taskman.ITask) error {
+func (self *SKVMHostDriver) RequestDeleteSnapshotsWithStorage(ctx context.Context, host *models.SHost, snapshot *models.SSnapshot, task taskman.ITask, snapshotIds []string) error {
 	url := fmt.Sprintf("/storages/%s/delete-snapshots", snapshot.StorageId)
 	body := jsonutils.NewDict()
 	body.Set("disk_id", jsonutils.NewString(snapshot.DiskId))
+	body.Set("snapshot_ids", jsonutils.NewStringArray(snapshotIds))
 
 	header := task.GetTaskRequestHeader()
 
 	_, err := host.Request(ctx, task.GetUserCred(), "POST", url, header, body)
+	return err
+}
+
+func (self *SKVMHostDriver) RequestDeleteSnapshotWithoutGuest(ctx context.Context, host *models.SHost, snapshot *models.SSnapshot, params *jsonutils.JSONDict, task taskman.ITask) error {
+	url := fmt.Sprintf("/storages/%s/delete-snapshot", snapshot.StorageId)
+	header := task.GetTaskRequestHeader()
+
+	_, err := host.Request(ctx, task.GetUserCred(), "POST", url, header, params)
 	return err
 }
 

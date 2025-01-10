@@ -48,14 +48,15 @@ type SNetInterface struct {
 
 	NicType compute.TNicType `width:"36" charset:"ascii" nullable:"true"` // Column(VARCHAR(36, charset='ascii'), nullable=True)
 
-	Index  int8  `nullable:"true"` // Column(TINYINT, nullable=True)
+	// SR-IOV nic index may exceed 256
+	Index  int   `nullable:"true"` // Column(TINYINT, nullable=True)
 	LinkUp bool  `nullable:"true"` // Column(Boolean, nullable=True)
 	Mtu    int16 `nullable:"true"` // Column(SMALLINT, nullable=True)
 
 	// Bridge名称
-	Bridge string `width:"64" charset:"ascii" nullable:"false"`
+	Bridge string `width:"64" charset:"ascii" nullable:"true"`
 	// 接口名称
-	Interface string `width:"16" charset:"ascii" nullable:"false"`
+	Interface string `width:"64" charset:"ascii" nullable:"true"`
 }
 
 // +onecloud:swagger-gen-ignore
@@ -186,7 +187,7 @@ func (netIf *SNetInterface) networkToNic(ipAddr string, network *SNetwork, nic *
 			nic.Routes = routes
 		}
 
-		nic.MaskLen = network.GuestIpMask
+		nic.Masklen = network.GuestIpMask
 		nic.Net = network.Name
 		nic.NetId = network.Id
 	}
@@ -244,6 +245,8 @@ func (netif *SNetInterface) getBaremetalJsonDesc() *types.SNic {
 		LinkUp:    netif.LinkUp,
 		Interface: netif.Interface,
 		Bridge:    netif.Bridge,
+
+		Index: netif.Index,
 	}
 	wire := netif.GetWire()
 	if wire != nil {
@@ -278,13 +281,13 @@ func (netif *SNetInterface) Delete(ctx context.Context, userCred mcclient.TokenC
 	return netif.SResourceBase.Delete(ctx, userCred)
 }
 
-func (netIf *SNetInterface) GetCandidateNetworkForIp(userCred mcclient.TokenCredential, ownerId mcclient.IIdentityProvider, scope rbacscope.TRbacScope, ipAddr string) (*SNetwork, error) {
+func (netIf *SNetInterface) GetCandidateNetworkForIp(ctx context.Context, userCred mcclient.TokenCredential, ownerId mcclient.IIdentityProvider, scope rbacscope.TRbacScope, ipAddr string) (*SNetwork, error) {
 	wire := netIf.GetWire()
 	if wire == nil {
 		return nil, nil
 	}
 	log.Infof("ipAddr: %s, netiName: %s, wire: %s", ipAddr, netIf.GetName(), wire.GetName())
-	return wire.GetCandidateNetworkForIp(userCred, ownerId, scope, ipAddr)
+	return wire.GetCandidateNetworkForIp(ctx, userCred, ownerId, scope, ipAddr)
 }
 
 func (netif *SNetInterface) IsUsableServernic() bool {

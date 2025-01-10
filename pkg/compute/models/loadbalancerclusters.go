@@ -35,6 +35,8 @@ import (
 	"yunion.io/x/onecloud/pkg/util/stringutils2"
 )
 
+// +onecloud:swagger-gen-model-singular=loadbalancercluster
+// +onecloud:swagger-gen-model-plural=loadbalancerclusters
 type SLoadbalancerClusterManager struct {
 	db.SStandaloneResourceBaseManager
 	SZoneResourceBaseManager
@@ -154,7 +156,7 @@ func (man *SLoadbalancerClusterManager) ValidateCreateData(
 		wireV.Optional(true),
 	}
 	for _, v := range vs {
-		if err := v.Validate(data); err != nil {
+		if err := v.Validate(ctx, data); err != nil {
 			return nil, err
 		}
 	}
@@ -207,7 +209,7 @@ func (lbc *SLoadbalancerCluster) ValidateUpdateData(
 ) (*jsonutils.JSONDict, error) {
 	wireV := validators.NewModelIdOrNameValidator("wire", "wire", lbc.GetOwnerId())
 	wireV.Optional(true)
-	if err := wireV.Validate(data); err != nil {
+	if err := wireV.Validate(ctx, data); err != nil {
 		return nil, err
 	}
 	if wireV.Model != nil {
@@ -563,7 +565,7 @@ func (cluster *SLoadbalancerCluster) PerformParamsPatch(ctx context.Context, use
 	d := jsonutils.NewDict()
 	d.Set("params", data)
 	paramsV := validators.NewStructValidator("params", &params)
-	if err := paramsV.Validate(d); err != nil {
+	if err := paramsV.Validate(ctx, d); err != nil {
 		return nil, err
 	}
 	// new vrrp virtual_router_id should be unique across clusters

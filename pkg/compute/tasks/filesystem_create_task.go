@@ -55,7 +55,7 @@ func init() {
 }
 
 func (self *FileSystemCreateTask) taskFailed(ctx context.Context, fs *models.SFileSystem, err error) {
-	fs.SetStatus(self.UserCred, api.NAS_STATUS_CREATE_FAILED, err.Error())
+	fs.SetStatus(ctx, self.UserCred, api.NAS_STATUS_CREATE_FAILED, err.Error())
 	logclient.AddActionLogWithStartable(self, fs, logclient.ACT_ALLOCATE, err, self.UserCred, false)
 	self.SetStageFailed(ctx, jsonutils.NewString(err.Error()))
 }
@@ -98,7 +98,7 @@ func (self *FileSystemCreateTask) OnInit(ctx context.Context, obj db.IStandalone
 
 	iFs, err := iRegion.CreateICloudFileSystem(opts)
 	if err != nil {
-		self.taskFailed(ctx, fs, errors.Wrapf(err, "iRegion.CreaetICloudFileSystem"))
+		self.taskFailed(ctx, fs, errors.Wrapf(err, "iRegion.CreateICloudFileSystem"))
 		return
 	}
 	db.SetExternalId(fs, self.GetUserCred(), iFs.GetGlobalId())

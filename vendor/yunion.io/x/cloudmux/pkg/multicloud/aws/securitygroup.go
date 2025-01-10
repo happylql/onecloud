@@ -21,6 +21,7 @@ import (
 
 	"yunion.io/x/jsonutils"
 	"yunion.io/x/pkg/errors"
+	"yunion.io/x/pkg/util/netutils"
 	"yunion.io/x/pkg/util/secrules"
 
 	api "yunion.io/x/cloudmux/pkg/apis/compute"
@@ -93,17 +94,26 @@ func (self *SSecurityGroup) GetRules() ([]cloudprovider.ISecurityGroupRule, erro
 
 func (self *SRegion) CreateSecurityGroupRule(secGrpId string, opts *cloudprovider.SecurityGroupRuleCreateOptions) (*SSecurityGroupRule, error) {
 	params := map[string]string{
-		"GroupId":                                secGrpId,
-		"IpPermissions.1.IpProtocol":             "-1",
-		"IpPermissions.1.IpRanges.1.Description": opts.Desc,
-		"IpPermissions.1.FromPort":               "0",
-		"IpPermissions.1.ToPort":                 "65535",
+		"GroupId":                    secGrpId,
+		"IpPermissions.1.IpProtocol": "-1",
+		"IpPermissions.1.FromPort":   "0",
+		"IpPermissions.1.ToPort":     "65535",
 	}
 	if opts.Protocol != secrules.PROTO_ANY {
 		params["IpPermissions.1.IpProtocol"] = strings.ToLower(opts.Protocol)
 	}
-	if len(opts.CIDR) > 0 {
+	if len(opts.CIDR) == 0 {
+		opts.CIDR = "0.0.0.0/0"
+	}
+	if _, err := netutils.NewIPV6Prefix(opts.CIDR); err == nil {
+		params["IpPermissions.1.Ipv6Ranges.1.CidrIpv6"] = opts.CIDR
+		params["IpPermissions.1.Ipv6Ranges.1.Description"] = opts.Desc
+	} else {
+		if !strings.Contains(opts.CIDR, "/") {
+			opts.CIDR = opts.CIDR + "/32"
+		}
 		params["IpPermissions.1.IpRanges.1.CidrIp"] = opts.CIDR
+		params["IpPermissions.1.IpRanges.1.Description"] = opts.Desc
 	}
 	start, end := 0, 0
 	if len(opts.Ports) > 0 {
@@ -154,7 +164,7 @@ func (self *SRegion) CreateSecurityGroupRule(secGrpId string, opts *cloudprovide
 	for i := range ret.SecurityGroupRuleSet {
 		return &ret.SecurityGroupRuleSet[i], nil
 	}
-	return nil, errors.Wrapf(cloudprovider.ErrNotFound, "after create")
+	return nil, errors.Wrapf(cloudprovider.ErrNotFound, "after create %s", jsonutils.Marshal(opts))
 }
 
 func (self *SRegion) DeleteSecurityGroupRule(secGrpId string, direction, ruleId string) error {

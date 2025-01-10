@@ -194,24 +194,6 @@ func (self *SAliyunRegionDriver) ValidateUpdateLoadbalancerListenerData(ctx cont
 	return input, nil
 }
 
-func (self *SAliyunRegionDriver) ValidateCreateSnapshopolicyDiskData(ctx context.Context,
-	userCred mcclient.TokenCredential, disk *models.SDisk, snapshotPolicy *models.SSnapshotPolicy) error {
-	//err := self.SManagedVirtualizationRegionDriver.ValidateCreateSnapshopolicyDiskData(ctx, userCred, disk, snapshotPolicy)
-	//if err != nil {
-	//	return nil
-	//}
-	//// In Aliyun, One disk only apply one snapshot policy
-	//ret, err := models.SnapshotPolicyDiskManager.FetchAllByDiskID(ctx, userCred, disk.GetId())
-	//if err != nil {
-	//	return err
-	//}
-	//if len(ret) != 0 {
-	//	return httperrors.NewBadRequestError("One disk could't attach two snapshot policy in aliyun; please detach last one first.")
-	//}
-	//return nil
-	return nil
-}
-
 func (self *SAliyunRegionDriver) ValidateCreateSnapshotData(ctx context.Context, userCred mcclient.TokenCredential, disk *models.SDisk, storage *models.SStorage, input *api.SnapshotCreateInput) error {
 	if strings.HasPrefix(input.Name, "auto") || strings.HasPrefix(input.Name, "http://") || strings.HasPrefix(input.Name, "https://") {
 		return httperrors.NewBadRequestError(
@@ -442,7 +424,7 @@ func (self *SAliyunRegionDriver) ValidateCreateElasticcacheAccountData(ctx conte
 	}
 
 	for _, v := range keyV {
-		if err := v.Validate(data); err != nil {
+		if err := v.Validate(ctx, data); err != nil {
 			return nil, err
 		}
 	}
@@ -653,7 +635,7 @@ func (self *SAliyunRegionDriver) GetMaxElasticcacheSecurityGroupCount() int {
 
 func (self *SAliyunRegionDriver) ValidateCreateVpcData(ctx context.Context, userCred mcclient.TokenCredential, input api.VpcCreateInput) (api.VpcCreateInput, error) {
 	cidrV := validators.NewIPv4PrefixValidator("cidr_block")
-	if err := cidrV.Validate(jsonutils.Marshal(input).(*jsonutils.JSONDict)); err != nil {
+	if err := cidrV.Validate(ctx, jsonutils.Marshal(input).(*jsonutils.JSONDict)); err != nil {
 		return input, err
 	}
 
@@ -679,55 +661,6 @@ func (self *SAliyunRegionDriver) IsSupportedNatGateway() bool {
 
 func (self *SAliyunRegionDriver) IsSupportedNas() bool {
 	return true
-}
-
-func (self *SAliyunRegionDriver) RequestSyncAccessGroup(ctx context.Context, userCred mcclient.TokenCredential, fs *models.SFileSystem, mt *models.SMountTarget, ag *models.SAccessGroup, task taskman.ITask) error {
-	taskman.LocalTaskRun(task, func() (jsonutils.JSONObject, error) {
-		if mt.AccessGroupId == api.DEFAULT_ACCESS_GROUP {
-			return jsonutils.Marshal(
-				map[string]string{
-					"access_group_id": fmt.Sprintf("DEFAULT_%s_GROUP_NAME", strings.ToUpper(mt.NetworkType)),
-				}), nil
-		}
-		caches, err := ag.GetAccessGroupCaches()
-		if err != nil {
-			return nil, errors.Wrapf(err, "ag.GetAccessGroupCaches")
-		}
-		for i := range caches {
-			if caches[i].CloudregionId == fs.CloudregionId &&
-				caches[i].ManagerId == fs.ManagerId &&
-				caches[i].FileSystemType == fs.FileSystemType &&
-				caches[i].NetworkType == mt.NetworkType {
-				if len(caches[i].ExternalId) > 0 {
-					err := caches[i].SyncRules(ctx)
-					if err != nil {
-						return nil, errors.Wrapf(err, "cache.SyncRules")
-					}
-					return jsonutils.Marshal(map[string]string{"access_group_id": caches[i].ExternalId}), nil
-				}
-				err := caches[i].CreateIAccessGroup(ctx)
-				if err != nil {
-					return nil, errors.Wrapf(err, "CreateIAccessGroup")
-				}
-				return jsonutils.Marshal(map[string]string{"access_group_id": caches[i].ExternalId}), nil
-			}
-		}
-		opts := models.SAccessGroupCacheRegisterInput{
-			Name:           ag.Name,
-			Desc:           ag.Description,
-			ManagerId:      fs.ManagerId,
-			CloudregionId:  fs.CloudregionId,
-			NetworkType:    mt.NetworkType,
-			FileSystemType: fs.FileSystemType,
-			AccessGroupId:  ag.Id,
-		}
-		cache, err := models.AccessGroupCacheManager.Register(ctx, &opts)
-		if err != nil {
-			return nil, errors.Wrapf(err, "Register")
-		}
-		return jsonutils.Marshal(map[string]string{"access_group_id": cache.ExternalId}), nil
-	})
-	return nil
 }
 
 func (self *SAliyunRegionDriver) ValidateCreateWafInstanceData(ctx context.Context, userCred mcclient.TokenCredential, input api.WafInstanceCreateInput) (api.WafInstanceCreateInput, error) {

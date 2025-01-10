@@ -37,7 +37,12 @@ func (self *GuestResumeTask) OnInit(ctx context.Context, obj db.IStandaloneModel
 	guest := obj.(*models.SGuest)
 	db.OpsLog.LogEvent(guest, db.ACT_RESUMING, "", self.UserCred)
 	self.SetStage("OnResumeComplete", nil)
-	err := guest.GetDriver().RequestResumeOnHost(ctx, guest, self)
+	drv, err := guest.GetDriver()
+	if err != nil {
+		self.OnResumeGuestFail(guest, err.Error())
+		return
+	}
+	err = drv.RequestResumeOnHost(ctx, guest, self)
 	if err != nil {
 		self.OnResumeGuestFail(guest, err.Error())
 	}
@@ -45,7 +50,7 @@ func (self *GuestResumeTask) OnInit(ctx context.Context, obj db.IStandaloneModel
 
 func (self *GuestResumeTask) OnResumeComplete(ctx context.Context, obj db.IStandaloneModel, data jsonutils.JSONObject) {
 	guest := obj.(*models.SGuest)
-	guest.SetStatus(self.UserCred, api.VM_RUNNING, "")
+	guest.SetStatus(ctx, self.UserCred, api.VM_RUNNING, "")
 	db.OpsLog.LogEvent(guest, db.ACT_RESUME, "", self.UserCred)
 	self.SetStageComplete(ctx, nil)
 }
@@ -53,11 +58,11 @@ func (self *GuestResumeTask) OnResumeComplete(ctx context.Context, obj db.IStand
 func (self *GuestResumeTask) OnResumeCompleteFailed(ctx context.Context, obj db.IStandaloneModel,
 	err jsonutils.JSONObject) {
 	guest := obj.(*models.SGuest)
-	guest.SetStatus(self.UserCred, api.VM_SUSPEND, "")
+	guest.SetStatus(ctx, self.UserCred, api.VM_SUSPEND, "")
 	db.OpsLog.LogEvent(guest, db.ACT_RESUME_FAIL, err.String(), self.UserCred)
 	self.SetStageFailed(ctx, err)
 }
 
 func (self *GuestResumeTask) OnResumeGuestFail(guest *models.SGuest, reason string) {
-	guest.SetStatus(self.UserCred, api.VM_RESUME_FAILED, reason)
+	guest.SetStatus(context.Background(), self.UserCred, api.VM_RESUME_FAILED, reason)
 }

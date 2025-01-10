@@ -43,7 +43,7 @@ func (self *SCtyunRegionDriver) GetProvider() string {
 
 func (self *SCtyunRegionDriver) ValidateCreateVpcData(ctx context.Context, userCred mcclient.TokenCredential, input api.VpcCreateInput) (api.VpcCreateInput, error) {
 	cidrV := validators.NewIPv4PrefixValidator("cidr_block")
-	if err := cidrV.Validate(jsonutils.Marshal(input).(*jsonutils.JSONDict)); err != nil {
+	if err := cidrV.Validate(ctx, jsonutils.Marshal(input).(*jsonutils.JSONDict)); err != nil {
 		return input, err
 	}
 
@@ -84,6 +84,6 @@ func (self *SCtyunRegionDriver) ValidateUpdateSecurityGroupRuleInput(ctx context
 
 func (self *SCtyunRegionDriver) GetSecurityGroupFilter(vpc *models.SVpc) (func(q *sqlchemy.SQuery) *sqlchemy.SQuery, error) {
 	return func(q *sqlchemy.SQuery) *sqlchemy.SQuery {
-		return q.Equals("cloudregion_id", vpc.CloudregionId)
+		return q.Equals("cloudregion_id", vpc.CloudregionId).Equals("manager_id", vpc.ManagerId)
 	}, nil
 }

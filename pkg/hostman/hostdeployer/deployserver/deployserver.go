@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io/ioutil"
 	"net"
 	"os"
 	"runtime/debug"
@@ -27,12 +28,17 @@ import (
 	"google.golang.org/grpc"
 
 	execlient "yunion.io/x/executor/client"
+	"yunion.io/x/jsonutils"
 	"yunion.io/x/log"
 	"yunion.io/x/pkg/errors"
+	"yunion.io/x/pkg/util/netutils"
 
+	app_common "yunion.io/x/onecloud/pkg/cloudcommon/app"
 	commonconsts "yunion.io/x/onecloud/pkg/cloudcommon/consts"
+	common_options "yunion.io/x/onecloud/pkg/cloudcommon/options"
 	"yunion.io/x/onecloud/pkg/cloudcommon/service"
 	"yunion.io/x/onecloud/pkg/hostman/diskutils"
+	"yunion.io/x/onecloud/pkg/hostman/diskutils/fsutils"
 	"yunion.io/x/onecloud/pkg/hostman/diskutils/libguestfs"
 	"yunion.io/x/onecloud/pkg/hostman/diskutils/nbd"
 	"yunion.io/x/onecloud/pkg/hostman/diskutils/qemu_kvm"
@@ -123,6 +129,15 @@ func (*DeployerServer) ResizeFs(ctx context.Context, req *deployapi.ResizeFsPara
 		}
 	}()
 	log.Infof("********* Resize fs on %#v", apiDiskInfo(req.DiskInfo))
+
+	if strings.HasPrefix(req.DiskInfo.Path, "/dev/loop") {
+		// HACK: container loop device, do resize locally
+		if err := fsutils.ResizeDiskFs(req.DiskInfo.Path, 0, true); err != nil {
+			return new(deployapi.Empty), errors.Wrap(err, "fsutils.ResizeDiskFs")
+		}
+		return new(deployapi.Empty), nil
+	}
+
 	disk, err := diskutils.GetIDisk(diskutils.DiskParams{
 		Hypervisor: req.Hypervisor,
 		DiskInfo:   apiDiskInfo(req.GetDiskInfo()),
@@ -132,6 +147,7 @@ func (*DeployerServer) ResizeFs(ctx context.Context, req *deployapi.ResizeFsPara
 		return new(deployapi.Empty), errors.Wrap(err, "GetIDisk fail")
 	}
 	defer disk.Cleanup()
+
 	if err := disk.Connect(nil); err != nil {
 		return new(deployapi.Empty), errors.Wrap(err, "disk connect failed")
 	}
@@ -310,6 +326,21 @@ func (s *SDeployService) FixPathEnv() error {
 	return os.Setenv("PATH", strings.Join(paths, ":"))
 }
 
+func InitEnvCommon() error {
+	commonconsts.SetAllowVmSELinux(DeployOption.AllowVmSELinux)
+
+	fsutils.SetExt4UsageTypeThresholds(
+		int64(DeployOption.Ext4LargefileSizeGb)*1024*1024*1024,
+		int64(DeployOption.Ext4HugefileSizeGb)*1024*1024*1024,
+	)
+	if err := fsdriver.Init(DeployOption.CloudrootDir); err != nil {
+		return errors.Wrap(err, "init fsdriver")
+	}
+
+	netutils.SetPrivatePrefixes(DeployOption.CustomizedPrivatePrefixes)
+	return nil
+}
+
 func (s *SDeployService) PrepareEnv() error {
 	if !fileutils2.Exists(DeployOption.DeployTempDir) {
 		err := os.MkdirAll(DeployOption.DeployTempDir, 0755)
@@ -318,15 +349,15 @@ func (s *SDeployService) PrepareEnv() error {
 		}
 	}
 	commonconsts.SetDeployTempDir(DeployOption.DeployTempDir)
-	commonconsts.SetAllowVmSELinux(DeployOption.AllowVmSELinux)
+
+	if err := InitEnvCommon(); err != nil {
+		return err
+	}
 
 	if err := s.FixPathEnv(); err != nil {
 		return err
 	}
 
-	if err := fsdriver.Init(DeployOption.PrivatePrefixes, DeployOption.CloudrootDir); err != nil {
-		log.Fatalln(err)
-	}
 	if DeployOption.ImageDeployDriver == consts.DEPLOY_DRIVER_LIBGUESTFS {
 		if err := libguestfs.Init(3); err != nil {
 			log.Fatalln(err)
@@ -338,26 +369,54 @@ func (s *SDeployService) PrepareEnv() error {
 			return errors.Wrap(err, "nbd.Init")
 		}
 	} else {
+		cpuArch, err := procutils.NewCommand("uname", "-m").Output()
+		if err != nil {
+			return errors.Wrap(err, "get cpu architecture")
+		}
+		cpuArchStr := strings.TrimSpace(string(cpuArch))
+
 		// prepare for yunionos don't have but necessary files
-		out, err := procutils.NewCommand("cp", "-rf", "/usr/bin/chntpw.static", "/opt/yunion/bin/chntpw.static").Output()
+		out, err := procutils.NewCommand("mkdir", "-p", "/opt/yunion/bin/bundles").Output()
 		if err != nil {
 			return errors.Wrapf(err, "cp files failed %s", out)
 		}
-		out, err = procutils.NewCommand("cp", "-rf", "/usr/bin/.chntpw.static.bin", "/opt/yunion/bin/.chntpw.static.bin").Output()
-		if err != nil {
-			return errors.Wrapf(err, "cp files failed %s", out)
+		copyFiles := map[string]string{
+			"/usr/bin/chntpw.static":         "/opt/yunion/bin/chntpw.static",
+			"/usr/bin/.chntpw.static.bin":    "/opt/yunion/bin/.chntpw.static.bin",
+			"/usr/bin/bundles/chntpw.static": "/opt/yunion/bin/bundles/chntpw.static",
+			"/usr/bin/growpart":              "/opt/yunion/bin/growpart",
+			"/usr/sbin/zerofree":             "/opt/yunion/bin/zerofree",
 		}
-		out, err = procutils.NewCommand("mkdir", "-p", "/opt/yunion/bin/bundles").Output()
-		if err != nil {
-			return errors.Wrapf(err, "cp files failed %s", out)
+		// x86_64 or aarch64
+		if cpuArchStr == qemu_kvm.OS_ARCH_AARCH64 {
+			copyFiles["/yunionos/aarch64/qemu-ga"] = fsdriver.QGA_BINARY_PATH
+		} else {
+			copyFiles["/yunionos/x86_64/qemu-ga"] = fsdriver.QGA_BINARY_PATH
+			copyFiles["/yunionos/x86_64/qemu-ga-x86_64.msi"] = fsdriver.QGA_WIN_MSI_INSTALLER_PATH
 		}
-		out, err = procutils.NewCommand("cp", "-rf", "/usr/bin/bundles/chntpw.static", "/opt/yunion/bin/bundles/chntpw.static").Output()
-		if err != nil {
-			return errors.Wrapf(err, "cp files failed %s", out)
+
+		for k, v := range copyFiles {
+			out, err = procutils.NewCommand("cp", "-rf", k, v).Output()
+			if err != nil {
+				return errors.Wrapf(err, "cp files failed %s", out)
+			}
 		}
-		out, err = procutils.NewCommand("cp", "-rf", "/usr/sbin/zerofree", "/opt/yunion/bin/zerofree").Output()
+
+		{
+			newOptions := DeployOption
+			newOptions.CommonConfigFile = ""
+			// save runtime options to /opt/yunion/host.conf
+			conf := jsonutils.Marshal(newOptions).YAMLString()
+			log.Debugf("deploy options: %s", conf)
+			err := ioutil.WriteFile("/opt/yunion/host.conf", []byte(conf), 0600)
+			if err != nil {
+				return errors.Wrapf(err, "save host.conf failed %s", out)
+			}
+		}
+
+		err = procutils.NewCommand("mkdir", "-p", qemu_kvm.RUN_ON_HOST_ROOT_PATH).Run()
 		if err != nil {
-			return errors.Wrapf(err, "cp files failed %s", out)
+			return errors.Wrap(err, "Failed to mkdir RUN_ON_HOST_ROOT_PATH: %s")
 		}
 
 		cmd := fmt.Sprintf("mkisofs -l -J -L -R -r -v -hide-rr-moved -o %s -graft-points vmware-vddk=/opt/vmware-vddk yunion=/opt/yunion", qemu_kvm.DEPLOY_ISO)
@@ -366,16 +425,18 @@ func (s *SDeployService) PrepareEnv() error {
 			return errors.Wrapf(err, "mkisofs failed %s", out)
 		}
 
-		cpuArch, err := procutils.NewCommand("uname", "-m").Output()
-		if err != nil {
-			return errors.Wrap(err, "get cpu architecture")
-		}
-		qemu_kvm.InitQemuDeployManager(
-			strings.TrimSpace(string(cpuArch)),
+		err = qemu_kvm.InitQemuDeployManager(
+			cpuArchStr,
+			DeployOption.DefaultQemuVersion,
+			DeployOption.EnableRemoteExecutor,
 			DeployOption.HugepagesOption == "native",
 			DeployOption.HugepageSizeMb*1024,
+			DeployOption.DeployGuestMemSizeMb,
 			DeployOption.DeployConcurrent,
 		)
+		if err != nil {
+			return err
+		}
 	}
 
 	// create /dev/lvm_remote
@@ -426,19 +487,26 @@ func (s *SDeployService) InitService() {
 		}
 	})
 
-	if DeployOption.DeployAction != "" {
+	optionsInit()
+
+	if len(DeployOption.DeployAction) > 0 {
 		if err := LocalInitEnv(); err != nil {
 			log.Fatalf("local init env %s", err)
 		}
 		return
 	}
 
-	log.Infof("exec socket path: %s", DeployOption.ExecutorSocketPath)
 	if DeployOption.EnableRemoteExecutor {
+		log.Infof("exec socket path: %s", DeployOption.ExecutorSocketPath)
 		execlient.Init(DeployOption.ExecutorSocketPath)
 		execlient.SetTimeoutSeconds(DeployOption.ExecutorConnectTimeoutSeconds)
 		procutils.SetRemoteExecutor()
 	}
+
+	app_common.InitAuth(&DeployOption.CommonOptions, func() {
+		log.Infof("Auth complete!!")
+	})
+	common_options.StartOptionManager(&DeployOption.CommonOptions, DeployOption.ConfigSyncPeriodSeconds, "", "", common_options.OnCommonOptionsChange)
 
 	if err := s.PrepareEnv(); err != nil {
 		log.Fatalln(err)

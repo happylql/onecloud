@@ -37,7 +37,12 @@ type GuestCreateDiskTask struct {
 func (self *GuestCreateDiskTask) OnInit(ctx context.Context, obj db.IStandaloneModel, data jsonutils.JSONObject) {
 	self.SetStage("OnDiskPrepared", nil)
 	guest := obj.(*models.SGuest)
-	err := guest.GetDriver().DoGuestCreateDisksTask(ctx, guest, self)
+	drv, err := guest.GetDriver()
+	if err != nil {
+		self.SetStageFailed(ctx, jsonutils.NewString(err.Error()))
+		return
+	}
+	err = drv.DoGuestCreateDisksTask(ctx, guest, self)
 	if err != nil {
 		self.SetStageFailed(ctx, jsonutils.NewString(err.Error()))
 	}
@@ -328,7 +333,7 @@ func (self *ESXiGuestCreateDiskTask) OnInit(ctx context.Context, obj db.IStandal
 			return
 		}
 
-		disk.SetStatus(self.UserCred, api.DISK_READY, "create disk success")
+		disk.SetStatus(ctx, self.UserCred, api.DISK_READY, "create disk success")
 		storage.ClearSchedDescCache()
 		db.OpsLog.LogEvent(disk, db.ACT_ALLOCATE, disk.GetShortDesc(ctx), self.UserCred)
 		db.OpsLog.LogAttachEvent(ctx, guest, disk, self.UserCred, disk.GetShortDesc(ctx))
@@ -439,6 +444,18 @@ func (self *NutanixGuestCreateDiskTask) OnInit(ctx context.Context, obj db.IStan
 	self.SetStageComplete(ctx, nil)
 }
 
+type CloudpodsGuestCreateDiskTask struct {
+	NutanixGuestCreateDiskTask
+}
+
+type SangForGuestCreateDiskTask struct {
+	NutanixGuestCreateDiskTask
+}
+
+type UisGuestCreateDiskTask struct {
+	NutanixGuestCreateDiskTask
+}
+
 func init() {
 	taskman.RegisterTask(GuestCreateBackupDisksTask{})
 	taskman.RegisterTask(GuestCreateDiskTask{})
@@ -447,4 +464,7 @@ func init() {
 	taskman.RegisterTask(ESXiGuestCreateDiskTask{})
 	taskman.RegisterTask(ProxmoxGuestCreateDiskTask{})
 	taskman.RegisterTask(NutanixGuestCreateDiskTask{})
+	taskman.RegisterTask(CloudpodsGuestCreateDiskTask{})
+	taskman.RegisterTask(SangForGuestCreateDiskTask{})
+	taskman.RegisterTask(UisGuestCreateDiskTask{})
 }

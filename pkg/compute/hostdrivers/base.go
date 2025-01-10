@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 
+	"yunion.io/x/cloudmux/pkg/cloudprovider"
 	"yunion.io/x/jsonutils"
 	"yunion.io/x/log"
 	"yunion.io/x/pkg/errors"
@@ -35,7 +36,23 @@ import (
 type SBaseHostDriver struct {
 }
 
-func (self *SBaseHostDriver) ValidateUpdateDisk(ctx context.Context, userCred mcclient.TokenCredential, input api.DiskUpdateInput) (api.DiskUpdateInput, error) {
+func (self *SBaseHostDriver) RequestBaremetalUnmaintence(ctx context.Context, userCred mcclient.TokenCredential, baremetal *models.SHost, task taskman.ITask) error {
+	return errors.Wrapf(cloudprovider.ErrNotSupported, "RequestBaremetalUnmaintence")
+}
+
+func (self *SBaseHostDriver) RequestBaremetalMaintence(ctx context.Context, userCred mcclient.TokenCredential, baremetal *models.SHost, task taskman.ITask) error {
+	return errors.Wrapf(cloudprovider.ErrNotSupported, "RequestBaremetalMaintence")
+}
+
+func (self *SBaseHostDriver) RequestSyncBaremetalHostStatus(ctx context.Context, userCred mcclient.TokenCredential, baremetal *models.SHost, task taskman.ITask) error {
+	return errors.Wrapf(cloudprovider.ErrNotSupported, "RequestSyncBaremetalHostStatus")
+}
+
+func (self *SBaseHostDriver) RequestSyncBaremetalHostConfig(ctx context.Context, userCred mcclient.TokenCredential, baremetal *models.SHost, task taskman.ITask) error {
+	return errors.Wrapf(cloudprovider.ErrNotSupported, "RequestSyncBaremetalHostConfig")
+}
+
+func (self *SBaseHostDriver) ValidateUpdateDisk(ctx context.Context, userCred mcclient.TokenCredential, input *api.DiskUpdateInput) (*api.DiskUpdateInput, error) {
 	return input, nil
 }
 
@@ -59,7 +76,11 @@ func (self *SBaseHostDriver) ValidateDiskSize(storage *models.SStorage, sizeGb i
 	return fmt.Errorf("Not Implement ValidateDiskSize")
 }
 
-func (self *SBaseHostDriver) RequestDeleteSnapshotsWithStorage(ctx context.Context, host *models.SHost, snapshot *models.SSnapshot, task taskman.ITask) error {
+func (self *SBaseHostDriver) RequestDeleteSnapshotsWithStorage(ctx context.Context, host *models.SHost, snapshot *models.SSnapshot, task taskman.ITask, snapshotIds []string) error {
+	return fmt.Errorf("Not Implement")
+}
+
+func (self *SBaseHostDriver) RequestDeleteSnapshotWithoutGuest(ctx context.Context, host *models.SHost, snapshot *models.SSnapshot, params *jsonutils.JSONDict, task taskman.ITask) error {
 	return fmt.Errorf("Not Implement")
 }
 
@@ -102,7 +123,7 @@ func (self *SBaseHostDriver) FinishUnconvert(ctx context.Context, userCred mccli
 	if bss != nil {
 		bs := bss.GetStorage()
 		if bs != nil {
-			bs.SetStatus(userCred, api.STORAGE_ONLINE, "")
+			bs.SetStatus(ctx, userCred, api.STORAGE_ONLINE, "")
 		} else {
 			log.Errorf("ERROR: baremetal storage is None???")
 		}
@@ -136,7 +157,7 @@ func (self *SBaseHostDriver) FinishUnconvert(ctx context.Context, userCred mccli
 func (self *SBaseHostDriver) CleanSchedCache(host *models.SHost) error {
 	return host.ClearSchedDescCache()
 }
-func (self *SBaseHostDriver) FinishConvert(userCred mcclient.TokenCredential, host *models.SHost, guest *models.SGuest, hostType string) error {
+func (self *SBaseHostDriver) FinishConvert(ctx context.Context, userCred mcclient.TokenCredential, host *models.SHost, guest *models.SGuest, hostType string) error {
 	_, err := db.Update(guest, func() error {
 		guest.VmemSize = 0
 		guest.VcpuCount = 0
@@ -157,7 +178,7 @@ func (self *SBaseHostDriver) FinishConvert(userCred mcclient.TokenCredential, ho
 		})
 	}
 	bs := host.GetBaremetalstorage().GetStorage()
-	bs.SetStatus(userCred, api.STORAGE_OFFLINE, "")
+	bs.SetStatus(ctx, userCred, api.STORAGE_OFFLINE, "")
 	db.Update(host, func() error {
 		host.Name = guest.GetName()
 		host.CpuReserved = 0
@@ -269,4 +290,12 @@ func (driver *SBaseHostDriver) RequestSyncOnHost(ctx context.Context, host *mode
 
 func (driver *SBaseHostDriver) RequestProbeIsolatedDevices(ctx context.Context, userCred mcclient.TokenCredential, host *models.SHost, input jsonutils.JSONObject) (*jsonutils.JSONArray, error) {
 	return nil, nil
+}
+
+func (driver *SBaseHostDriver) RequestDiskSrcMigratePrepare(ctx context.Context, host *models.SHost, disk *models.SDisk, task taskman.ITask) (jsonutils.JSONObject, error) {
+	return nil, fmt.Errorf("not supported")
+}
+
+func (driver *SBaseHostDriver) RequestDiskMigrate(ctx context.Context, targetHost *models.SHost, targetStorage *models.SStorage, disk *models.SDisk, task taskman.ITask, body *jsonutils.JSONDict) error {
+	return fmt.Errorf("not supported")
 }

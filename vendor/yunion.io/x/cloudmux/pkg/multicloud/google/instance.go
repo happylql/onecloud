@@ -133,7 +133,7 @@ func (region *SRegion) GetInstance(id string) (*SInstance, error) {
 }
 
 func (instance *SInstance) GetHostname() string {
-	return instance.GetName()
+	return ""
 }
 
 func (instance *SInstance) fetchMachineType() error {
@@ -164,7 +164,7 @@ func (self *SInstance) Refresh() error {
 	return nil
 }
 
-//PROVISIONING, STAGING, RUNNING, STOPPING, STOPPED, SUSPENDING, SUSPENDED, and TERMINATED.
+// PROVISIONING, STAGING, RUNNING, STOPPING, STOPPED, SUSPENDING, SUSPENDED, and TERMINATED.
 func (instance *SInstance) GetStatus() string {
 	switch instance.Status {
 	case "PROVISIONING":
@@ -408,24 +408,38 @@ func (instance *SInstance) UpdateUserData(userData string) error {
 	return instance.host.zone.region.SetMetadata(instance.SelfLink, instance.Metadata)
 }
 
-func (instance *SInstance) RebuildRoot(ctx context.Context, desc *cloudprovider.SManagedVMRebuildRootConfig) (string, error) {
-	diskId, err := instance.host.zone.region.RebuildRoot(instance.Id, desc.ImageId, desc.SysSizeGB)
+func (instance *SInstance) RebuildRoot(ctx context.Context, opts *cloudprovider.SManagedVMRebuildRootConfig) (string, error) {
+	diskId, err := instance.host.zone.region.RebuildRoot(instance.Id, opts.ImageId, opts.SysSizeGB)
 	if err != nil {
 		return "", errors.Wrap(err, "region.RebuildRoot")
 	}
-	return diskId, instance.DeployVM(ctx, "", desc.Account, desc.Password, desc.PublicKey, false, "")
+	deployOpts := &cloudprovider.SInstanceDeployOptions{
+		Username:  opts.Account,
+		Password:  opts.Password,
+		UserData:  opts.UserData,
+		PublicKey: opts.PublicKey,
+	}
+	return diskId, instance.DeployVM(ctx, deployOpts)
 }
 
-func (instance *SInstance) DeployVM(ctx context.Context, name string, username string, password string, publicKey string, deleteKeypair bool, description string) error {
-	conf := cloudinit.SCloudConfig{}
-	user := cloudinit.NewUser(username)
-	if len(password) > 0 {
-		user.Password(password)
+func (instance *SInstance) DeployVM(ctx context.Context, opts *cloudprovider.SInstanceDeployOptions) error {
+	conf := cloudinit.SCloudConfig{
+		SshPwauth: cloudinit.SSH_PASSWORD_AUTH_ON,
 	}
-	if len(publicKey) > 0 {
-		user.SshKey(publicKey)
+	if len(opts.UserData) > 0 {
+		config, err := cloudinit.ParseUserData(opts.UserData)
+		if err == nil {
+			conf.Merge(config)
+		}
 	}
-	if len(password) > 0 || len(publicKey) > 0 {
+	user := cloudinit.NewUser(opts.Username)
+	if len(opts.Password) > 0 {
+		user.Password(opts.Password)
+	}
+	if len(opts.PublicKey) > 0 {
+		user.SshKey(opts.PublicKey)
+	}
+	if len(opts.Password) > 0 || len(opts.PublicKey) > 0 {
 		conf.MergeUser(user)
 		items := []SMetadataItem{}
 		instance.Refresh()
@@ -439,7 +453,7 @@ func (instance *SInstance) DeployVM(ctx context.Context, name string, username s
 		instance.Metadata.Items = items
 		return instance.host.zone.region.SetMetadata(instance.SelfLink, instance.Metadata)
 	}
-	if deleteKeypair {
+	if opts.DeleteKeypair {
 		items := []SMetadataItem{}
 		items = append(items, SMetadataItem{Key: METADATA_STARTUP_SCRIPT, Value: cloudinit.CLOUD_SHELL_HEADER + "\nrm -rf /root/.ssh/authorized_keys"})
 		instance.Refresh()
@@ -560,8 +574,21 @@ func (region *SRegion) _createVM(zone string, desc *cloudprovider.SManagedVMCrea
 	nameConv := func(name string) string {
 		name = strings.Replace(name, "_", "-", -1)
 		name = pinyinutils.Text2Pinyin(name)
-		return strings.ToLower(name)
+		name = strings.ToLower(name)
+		if len(name) > 63 {
+			name = name[:63]
+		}
+		if name[len(name)-1] == '-' {
+			name = name[:len(name)-1] + "1"
+		}
+		return name
 	}
+
+	labels := map[string]string{}
+	for k, v := range desc.Tags {
+		labels[encode.EncodeGoogleLabel(k)] = encode.EncodeGoogleLabel(v)
+	}
+
 	disks = append(disks, map[string]interface{}{
 		"boot": true,
 		"initializeParams": map[string]interface{}{
@@ -569,6 +596,7 @@ func (region *SRegion) _createVM(zone string, desc *cloudprovider.SManagedVMCrea
 			"sourceImage": desc.ExternalImageId,
 			"diskSizeGb":  desc.SysDisk.SizeGB,
 			"diskType":    fmt.Sprintf("zones/%s/diskTypes/%s", zone, desc.SysDisk.StorageType),
+			"labels":      labels,
 		},
 		"autoDelete": true,
 	})
@@ -582,6 +610,7 @@ func (region *SRegion) _createVM(zone string, desc *cloudprovider.SManagedVMCrea
 				"diskName":   nameConv(disk.Name),
 				"diskSizeGb": disk.SizeGB,
 				"diskType":   fmt.Sprintf("zones/%s/diskTypes/%s", zone, disk.StorageType),
+				"labels":     labels,
 			},
 			"autoDelete": true,
 		})
@@ -601,11 +630,6 @@ func (region *SRegion) _createVM(zone string, desc *cloudprovider.SManagedVMCrea
 			networkInterface,
 		},
 		"disks": disks,
-	}
-
-	labels := map[string]string{}
-	for k, v := range desc.Tags {
-		labels[encode.EncodeGoogleLabel(k)] = encode.EncodeGoogleLabel(v)
 	}
 
 	if len(labels) > 0 {
@@ -635,24 +659,6 @@ func (region *SRegion) _createVM(zone string, desc *cloudprovider.SManagedVMCrea
 			},
 		}
 	}
-	//if len(serviceAccounts) > 0 {
-	//	params["serviceAccounts"] = []struct {
-	//		Email  string
-	//		Scopes []string
-	//	}{
-	//		{
-	//			Email: serviceAccounts[0],
-	//			Scopes: []string{
-	//				"https://www.googleapis.com/auth/devstorage.read_only",
-	//				"https://www.googleapis.com/auth/logging.write",
-	//				"https://www.googleapis.com/auth/monitoring.write",
-	//				"https://www.googleapis.com/auth/servicecontrol",
-	//				"https://www.googleapis.com/auth/service.management.readonly",
-	//				"https://www.googleapis.com/auth/trace.append",
-	//			},
-	//		},
-	//	}
-	//}
 	log.Debugf("create google instance params: %s", jsonutils.Marshal(params).String())
 	instance := &SInstance{}
 	resource := fmt.Sprintf("zones/%s/instances", zone)
@@ -791,6 +797,13 @@ func (region *SRegion) RebuildRoot(instanceId string, imageId string, sysDiskSiz
 		if sysDiskSizeGb == 0 {
 			sysDiskSizeGb = disk.SizeGB
 		}
+	}
+	image, err := region.GetImage(imageId)
+	if err != nil {
+		return "", errors.Wrapf(err, "GetImage")
+	}
+	if image.DiskSizeGb > sysDiskSizeGb {
+		sysDiskSizeGb = image.DiskSizeGb
 	}
 
 	zone, err := region.GetZone(instance.Zone)

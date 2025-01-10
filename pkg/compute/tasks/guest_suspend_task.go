@@ -37,9 +37,14 @@ func init() {
 func (self *GuestSuspendTask) OnInit(ctx context.Context, obj db.IStandaloneModel, data jsonutils.JSONObject) {
 	guest := obj.(*models.SGuest)
 	db.OpsLog.LogEvent(guest, db.ACT_STOPPING, "", self.UserCred)
-	guest.SetStatus(self.UserCred, api.VM_SUSPENDING, "GuestSusPendTask")
+	guest.SetStatus(ctx, self.UserCred, api.VM_SUSPENDING, "GuestSusPendTask")
 	self.SetStage("OnSuspendComplete", nil)
-	err := guest.GetDriver().RequestSuspendOnHost(ctx, guest, self)
+	drv, err := guest.GetDriver()
+	if err != nil {
+		self.OnSuspendGuestFail(guest, err.Error())
+		return
+	}
+	err = drv.RequestSuspendOnHost(ctx, guest, self)
 	if err != nil {
 		self.OnSuspendGuestFail(guest, err.Error())
 	}
@@ -47,7 +52,7 @@ func (self *GuestSuspendTask) OnInit(ctx context.Context, obj db.IStandaloneMode
 
 func (self *GuestSuspendTask) OnSuspendComplete(ctx context.Context, obj db.IStandaloneModel, data jsonutils.JSONObject) {
 	guest := obj.(*models.SGuest)
-	guest.SetStatus(self.UserCred, api.VM_SUSPEND, "")
+	guest.SetStatus(ctx, self.UserCred, api.VM_SUSPEND, "")
 	db.OpsLog.LogEvent(guest, db.ACT_STOP, "", self.UserCred)
 	logclient.AddActionLogWithStartable(self, guest, logclient.ACT_VM_SUSPEND, "success", self.UserCred, true)
 	self.SetStageComplete(ctx, nil)
@@ -55,12 +60,12 @@ func (self *GuestSuspendTask) OnSuspendComplete(ctx context.Context, obj db.ISta
 
 func (self *GuestSuspendTask) OnSuspendCompleteFailed(ctx context.Context, obj db.IStandaloneModel, err jsonutils.JSONObject) {
 	guest := obj.(*models.SGuest)
-	guest.SetStatus(self.UserCred, api.VM_RUNNING, "")
+	guest.SetStatus(ctx, self.UserCred, api.VM_RUNNING, "")
 	db.OpsLog.LogEvent(guest, db.ACT_STOP_FAIL, err.String(), self.UserCred)
 	logclient.AddActionLogWithStartable(self, guest, logclient.ACT_VM_SUSPEND, err.String(), self.UserCred, false)
 	self.SetStageFailed(ctx, err)
 }
 
 func (self *GuestSuspendTask) OnSuspendGuestFail(guest *models.SGuest, reason string) {
-	guest.SetStatus(self.UserCred, api.VM_SUSPEND_FAILED, reason)
+	guest.SetStatus(context.Background(), self.UserCred, api.VM_SUSPEND_FAILED, reason)
 }

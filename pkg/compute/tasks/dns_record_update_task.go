@@ -38,7 +38,7 @@ func init() {
 }
 
 func (self *DnsRecordUpdateTask) taskFailed(ctx context.Context, record *models.SDnsRecord, err error) {
-	record.SetStatus(self.GetUserCred(), apis.STATUS_UNKNOWN, err.Error())
+	record.SetStatus(ctx, self.GetUserCred(), apis.STATUS_UNKNOWN, err.Error())
 	db.OpsLog.LogEvent(record, db.ACT_UPDATE, record.GetShortDesc(ctx), self.GetUserCred())
 	logclient.AddActionLogWithContext(ctx, record, logclient.ACT_UPDATE, err, self.UserCred, false)
 	self.SetStageFailed(ctx, jsonutils.NewString(err.Error()))
@@ -75,6 +75,7 @@ func (self *DnsRecordUpdateTask) OnInit(ctx context.Context, obj db.IStandaloneM
 		DnsName:     record.Name,
 		DnsValue:    record.DnsValue,
 		DnsType:     cloudprovider.TDnsType(record.DnsType),
+		Enabled:     record.Enabled.Bool(),
 		Ttl:         record.TTL,
 		MxPriority:  record.MxPriority,
 		PolicyType:  cloudprovider.TDnsPolicyType(record.PolicyType),
@@ -95,6 +96,6 @@ func (self *DnsRecordUpdateTask) taskComplete(ctx context.Context, record *model
 		Obj:    record,
 		Action: notifyclient.ActionUpdate,
 	})
-	record.SetStatus(self.UserCred, apis.SKU_STATUS_AVAILABLE, "")
+	record.SetStatus(ctx, self.UserCred, apis.SKU_STATUS_AVAILABLE, "")
 	self.SetStageComplete(ctx, nil)
 }

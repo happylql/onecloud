@@ -36,23 +36,22 @@ import (
 	"yunion.io/x/onecloud/pkg/cloudcommon/cronman"
 	"yunion.io/x/onecloud/pkg/cloudcommon/db"
 	common_options "yunion.io/x/onecloud/pkg/cloudcommon/options"
-	"yunion.io/x/onecloud/pkg/webconsole"
 	"yunion.io/x/onecloud/pkg/webconsole/models"
 	o "yunion.io/x/onecloud/pkg/webconsole/options"
 	"yunion.io/x/onecloud/pkg/webconsole/server"
 )
-
-func ensureBinExists(binPath string) {
-	if _, err := os.Stat(binPath); os.IsNotExist(err) {
-		log.Fatalf("Binary %s not exists", binPath)
-	}
-}
 
 func StartService() {
 
 	opts := &o.Options
 	commonOpts := &o.Options.CommonOptions
 	common_options.ParseOptions(opts, os.Args, "webconsole.conf", api.SERVICE_TYPE)
+
+	app_common.InitAuth(commonOpts, func() {
+		log.Infof("Auth complete")
+	})
+
+	common_options.StartOptionManager(opts, opts.ConfigSyncPeriodSeconds, api.SERVICE_TYPE, api.SERVICE_VERSION, o.OnOptionsChange)
 
 	if opts.ApiServer == "" {
 		log.Fatalf("--api-server must specified")
@@ -61,16 +60,6 @@ func StartService() {
 	if err != nil {
 		log.Fatalf("invalid --api-server %s", opts.ApiServer)
 	}
-
-	for _, binPath := range []string{opts.IpmitoolPath} {
-		ensureBinExists(binPath)
-	}
-
-	app_common.InitAuth(commonOpts, func() {
-		log.Infof("Auth complete")
-	})
-
-	common_options.StartOptionManager(opts, opts.ConfigSyncPeriodSeconds, api.SERVICE_TYPE, api.SERVICE_VERSION, o.OnOptionsChange)
 
 	registerSigTraps()
 	start()
@@ -90,7 +79,7 @@ func start() {
 
 	cloudcommon.InitDB(dbOpts)
 
-	webconsole.InitHandlers(app)
+	initHandlers(app)
 
 	db.EnsureAppSyncDB(app, dbOpts, models.InitDB)
 
@@ -98,17 +87,17 @@ func start() {
 	root.UseEncodedPath()
 
 	// api handler
-	root.PathPrefix(webconsole.ApiPathPrefix).Handler(app)
+	root.PathPrefix(ApiPathPrefix).Handler(app)
 
 	srv := server.NewConnectionServer()
 	// websocket command text console handler
-	root.Handle(webconsole.ConnectPathPrefix, srv)
+	root.Handle(ConnectPathPrefix, srv)
 
 	// websockify graphic console handler
-	root.Handle(webconsole.WebsockifyPathPrefix, srv)
+	root.Handle(WebsockifyPathPrefix, srv)
 
 	// websocketproxy handler
-	root.Handle(webconsole.WebsocketProxyPathPrefix, srv)
+	root.Handle(WebsocketProxyPathPrefix, srv)
 
 	// misc handler
 	addMiscHandlers(app, root)

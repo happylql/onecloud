@@ -16,6 +16,7 @@ package oracle
 
 import (
 	"context"
+	"net/url"
 	"time"
 
 	"yunion.io/x/jsonutils"
@@ -54,8 +55,6 @@ func (self *SRegion) GetDisk(id string) (*SDisk, error) {
 		return nil, err
 	}
 	return ret, nil
-
-	return nil, cloudprovider.ErrNotImplemented
 }
 
 func (self *SDisk) GetId() string {
@@ -168,10 +167,6 @@ func (self *SDisk) GetISnapshots() ([]cloudprovider.ICloudSnapshot, error) {
 	return nil, cloudprovider.ErrNotImplemented
 }
 
-func (self *SDisk) GetExtSnapshotPolicyIds() ([]string, error) {
-	return nil, cloudprovider.ErrNotImplemented
-}
-
 func (self *SDisk) GetTemplateId() string {
 	return ""
 }
@@ -193,11 +188,11 @@ func (self *SDisk) GetProjectId() string {
 }
 
 func (self *SRegion) GetDisks(zoneId string) ([]SDisk, error) {
-	params := map[string]interface{}{}
+	query := url.Values{}
 	if len(zoneId) > 0 {
-		params["availabilityDomain"] = zoneId
+		query.Set("availabilityDomain", zoneId)
 	}
-	resp, err := self.list(SERVICE_IAAS, "volumes", params)
+	resp, err := self.list(SERVICE_IAAS, "volumes", query)
 	if err != nil {
 		return nil, err
 	}

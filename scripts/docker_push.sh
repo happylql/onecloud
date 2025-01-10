@@ -157,6 +157,16 @@ build_process() {
     local arch=$2
     local is_all_arch=$3
     local img_name=$(get_image_name $component $arch $is_all_arch)
+    local build_env=""
+
+    case "$component" in
+    host | host-image)
+        build_env="$build_env CGO_ENABLED=1"
+        ;;
+    *)
+        build_env="$build_env CGO_ENABLED=0"
+        ;;
+    esac
 
     build_bin $component
     if [[ "$DRY_RUN" == "true" ]]; then
@@ -175,12 +185,14 @@ build_process_with_buildx() {
     local img_name=$(get_image_name $component $arch $is_all_arch)
 
     build_env="GOARCH=$arch"
-    if [[ "$arch" == arm64 ]]; then
-        build_env="$build_env"
-        if [[ $component == host ]]; then
-            build_env="$build_env CGO_ENABLED=1"
-        fi
-    fi
+    case "$component" in
+    host | host-image)
+        build_env="$build_env CGO_ENABLED=1"
+        ;;
+    *)
+        build_env="$build_env CGO_ENABLED=0"
+        ;;
+    esac
 
     case "$component" in
     host | torrent)
@@ -243,6 +255,50 @@ fi
 cd $SRC_DIR
 mkdir -p $SRC_DIR/_output
 
+show_update_cmd() {
+    local component=$1
+    local arch=$2
+    local spec=$1
+    local name=$1
+    local tag=${TAG}
+    if [[ "$arch" == arm64 || "$component" == host-image ]]; then
+        tag="${tag}-$arch"
+    fi
+
+    case "$component" in
+    'apigateway')
+        spec='apiGateway'
+        ;;
+    'apimap')
+        spec='apiMap'
+        ;;
+    'baremetal-agent')
+        spec='baremetalagent'
+        name='baremetal-agent'
+        ;;
+    'host')
+        spec='hostagent'
+        ;;
+    'host-deployer')
+        spec='hostdeployer'
+        ;;
+    'region')
+        spec='regionServer'
+        ;;
+    'region-dns')
+        spec='regionDNS'
+        ;;
+    'vpcagent')
+        spec='vpcAgent'
+        ;;
+    'esxi-agent')
+        spec='esxiagent'
+        ;;
+    esac
+
+    echo "kubectl patch oc -n onecloud default --type='json' -p='[{op: replace, path: /spec/${spec}/imageName, value: ${name}},{"op": "replace", "path": "/spec/${spec}/repository", "value": "${REGISTRY}"},{"op": "add", "path": "/spec/${spec}/tag", "value": "${tag}"}]'"
+}
+
 for component in $COMPONENTS; do
     if [[ $component == *cli ]]; then
         echo "Please build image for climc"
@@ -261,11 +317,25 @@ for component in $COMPONENTS; do
             general_build $component $arch "true"
         done
         make_manifest_image $component
+        #show_update_cmd $component $ARCH
         ;;
     *)
         if [ -e "$DOCKER_DIR/Dockerfile.$component" ]; then
             general_build $component $ARCH "false"
+            #show_update_cmd $component $ARCH
         fi
         ;;
     esac
+done
+
+echo ""
+
+for component in $COMPONENTS; do
+    if [[ $component == *cli ]]; then
+        continue
+    fi
+    if [[ $component == host-image ]]; then
+        continue
+    fi
+    show_update_cmd $component
 done

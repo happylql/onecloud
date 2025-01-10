@@ -69,18 +69,23 @@ func (self *DiskSaveTask) OnInit(ctx context.Context, obj db.IStandaloneModel, d
 		self.taskFailed(ctx, disk, fmt.Errorf("Cannot find host for disk"))
 		return
 	}
-	disk.SetStatus(self.GetUserCred(), api.DISK_START_SAVE, "")
+	disk.SetStatus(ctx, self.GetUserCred(), api.DISK_START_SAVE, "")
 	for _, guest := range disk.GetGuests() {
-		guest.SetStatus(self.GetUserCred(), api.VM_SAVE_DISK, "")
+		guest.SetStatus(ctx, self.GetUserCred(), api.VM_SAVE_DISK, "")
 	}
 	self.StartBackupDisk(ctx, disk, host)
 }
 
 func (self *DiskSaveTask) StartBackupDisk(ctx context.Context, disk *models.SDisk, host *models.SHost) {
 	self.SetStage("OnDiskBackupComplete", nil)
-	disk.SetStatus(self.GetUserCred(), api.DISK_SAVING, "")
+	disk.SetStatus(ctx, self.GetUserCred(), api.DISK_SAVING, "")
 	imageId, _ := self.GetParams().GetString("image_id")
-	err := host.GetHostDriver().RequestPrepareSaveDiskOnHost(ctx, host, disk, imageId, self)
+	driver, err := host.GetHostDriver()
+	if err != nil {
+		self.taskFailed(ctx, disk, errors.Wrapf(err, "GetHostDriver"))
+		return
+	}
+	err = driver.RequestPrepareSaveDiskOnHost(ctx, host, disk, imageId, self)
 	if err != nil {
 		self.taskFailed(ctx, disk, errors.Wrapf(err, "RequestPrepareSaveDiskOnHost"))
 		return
@@ -122,8 +127,12 @@ func (self *DiskSaveTask) RefreshImageCache(ctx context.Context, imageId string)
 }
 
 func (self *DiskSaveTask) UploadDisk(ctx context.Context, host *models.SHost, disk *models.SDisk, imageId string, data *jsonutils.JSONDict) error {
+	driver, err := host.GetHostDriver()
+	if err != nil {
+		return errors.Wrapf(err, "GetHostDriver")
+	}
 	self.SetStage("OnUploadDiskComplete", nil)
-	return host.GetHostDriver().RequestSaveUploadImageOnHost(ctx, host, disk, imageId, self, jsonutils.Marshal(data))
+	return driver.RequestSaveUploadImageOnHost(ctx, host, disk, imageId, self, jsonutils.Marshal(data))
 }
 
 func (self *DiskSaveTask) OnUploadDiskComplete(ctx context.Context, disk *models.SDisk, data jsonutils.JSONObject) {

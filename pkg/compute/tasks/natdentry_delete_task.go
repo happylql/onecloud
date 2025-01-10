@@ -38,7 +38,7 @@ func init() {
 }
 
 func (self *SNatDEntryDeleteTask) taskFailed(ctx context.Context, dnat *models.SNatDEntry, err error) {
-	dnat.SetStatus(self.UserCred, api.NAT_STATUS_DELETE_FAILED, err.Error())
+	dnat.SetStatus(ctx, self.UserCred, api.NAT_STATUS_DELETE_FAILED, err.Error())
 	db.OpsLog.LogEvent(dnat, db.ACT_DELOCATE_FAIL, err, self.UserCred)
 	nat, _ := dnat.GetNatgateway()
 	if nat != nil {
@@ -76,7 +76,7 @@ func (self *SNatDEntryDeleteTask) OnInit(ctx context.Context, obj db.IStandalone
 		return
 	}
 
-	iDnat, err := iNat.GetINatDEntryByID(dnat.ExternalId)
+	iDnat, err := iNat.GetINatDEntryById(dnat.ExternalId)
 	if err != nil {
 		if errors.Cause(err) == cloudprovider.ErrNotFound {
 			self.taskComplete(ctx, dnat)

@@ -37,7 +37,7 @@ func init() {
 }
 
 func (self *DiskSyncstatusTask) taskFailed(ctx context.Context, disk *models.SDisk, err error) {
-	disk.SetStatus(self.GetUserCred(), api.DISK_UNKNOWN, err.Error())
+	disk.SetStatus(ctx, self.GetUserCred(), api.DISK_UNKNOWN, err.Error())
 	self.SetStageFailed(ctx, jsonutils.NewString(err.Error()))
 	db.OpsLog.LogEvent(disk, db.ACT_SYNC_STATUS, disk.GetShortDesc(ctx), self.GetUserCred())
 	logclient.AddActionLogWithContext(ctx, disk, logclient.ACT_SYNC_STATUS, err, self.UserCred, false)
@@ -66,6 +66,7 @@ func (self *DiskSyncstatusTask) OnInit(ctx context.Context, obj db.IStandaloneMo
 }
 
 func (self *DiskSyncstatusTask) OnDiskSyncStatusComplete(ctx context.Context, obj db.IStandaloneModel, data jsonutils.JSONObject) {
+	logclient.AddActionLogWithContext(ctx, obj, logclient.ACT_SYNC_STATUS, nil, self.UserCred, true)
 	self.SetStageComplete(ctx, nil)
 }
 

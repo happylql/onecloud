@@ -54,7 +54,10 @@ func (s *SKVMGuestInstance) initGuestDesc() error {
 	if err != nil {
 		return err
 	}
-	s.initMemDesc(s.Desc.Mem)
+	err = s.initMemDesc(s.Desc.Mem)
+	if err != nil {
+		return errors.Wrap(err, "initMemDesc")
+	}
 	s.initMachineDesc()
 
 	pciRoot, pciBridge := s.initGuestPciControllers(s.manager.host.IsKvmSupport())
@@ -112,7 +115,7 @@ func (s *SKVMGuestInstance) loadGuestPciAddresses() error {
 	if err != nil {
 		return errors.Wrap(err, "load desc ensure pci address")
 	}
-	if err = s.SaveLiveDesc(s.Desc); err != nil {
+	if err = SaveLiveDesc(s, s.Desc); err != nil {
 		return errors.Wrap(err, "loadGuestPciAddresses save desc")
 	}
 	return nil
@@ -321,6 +324,8 @@ func (s *SKVMGuestInstance) initGuestNetworks(pciRoot, pciBridge *desc.PCIContro
 				s.Desc.Nics[i].Pci = desc.NewPCIDevice(cont.CType, "e1000-82545em", id)
 			case "vmxnet3":
 				s.Desc.Nics[i].Pci = desc.NewPCIDevice(cont.CType, "vmxnet3", id)
+			case "rtl8139":
+				s.Desc.Nics[i].Pci = desc.NewPCIDevice(cont.CType, "rtl8139", id)
 			}
 		}
 	}
@@ -412,14 +417,29 @@ func (s *SKVMGuestInstance) initGuestDisks(pciRoot, pciBridge *desc.PCIControlle
 	for i := 0; i < len(s.Desc.Disks); i++ {
 		devType := qemu.GetDiskDeviceModel(s.Desc.Disks[i].Driver)
 		id := fmt.Sprintf("drive_%d", s.Desc.Disks[i].Index)
+		if s.Desc.Disks[i].Pci != nil || s.Desc.Disks[i].Scsi != nil {
+			log.Infof("guest %s disk %v has been init", s.Desc.Uuid, s.Desc.Disks[i].Index)
+			continue
+		}
+
 		switch s.Desc.Disks[i].Driver {
 		case DISK_DRIVER_VIRTIO:
 			if s.Desc.Disks[i].Pci == nil {
 				s.Desc.Disks[i].Pci = desc.NewPCIDevice(cont.CType, devType, id)
 			}
 		case DISK_DRIVER_SCSI:
+			if s.Desc.VirtioScsi == nil {
+				s.Desc.VirtioScsi = &desc.SGuestVirtioScsi{
+					PCIDevice: desc.NewPCIDevice(pciRoot.CType, "virtio-scsi-pci", "scsi"),
+				}
+			}
 			s.Desc.Disks[i].Scsi = desc.NewScsiDevice(s.Desc.VirtioScsi.Id, devType, id)
 		case DISK_DRIVER_PVSCSI:
+			if s.Desc.PvScsi == nil {
+				s.Desc.PvScsi = &desc.SGuestPvScsi{
+					PCIDevice: desc.NewPCIDevice(pciRoot.CType, "pvscsi", "scsi"),
+				}
+			}
 			s.Desc.Disks[i].Scsi = desc.NewScsiDevice(s.Desc.PvScsi.Id, devType, id)
 		case DISK_DRIVER_IDE:
 			s.Desc.Disks[i].Ide = desc.NewIdeDevice(devType, id)
@@ -799,6 +819,10 @@ func (s *SKVMGuestInstance) initGuestDescFromExistingGuest(
 		return errors.Wrap(err, "init guest memory devices")
 	}
 	s.initMachineDesc()
+	if s.manager.host.IsX8664() && !s.hasHpet(qtree) {
+		noHpet := true
+		s.Desc.NoHpet = &noHpet
+	}
 
 	// This code is designed to ensure compatibility with older guests.
 	// However, it is not recommended for new guests to generate a desc file from it
@@ -853,7 +877,7 @@ func (s *SKVMGuestInstance) initGuestDescFromExistingGuest(
 					return errors.Wrap(err, "ensure pvscsi pci address")
 				}
 			}
-		case "video0":
+		case "video0", "video1":
 			if s.Desc.VgaDevice == nil {
 				s.initGuestVga(pciRoot)
 			}

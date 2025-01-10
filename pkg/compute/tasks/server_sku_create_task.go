@@ -37,7 +37,7 @@ func init() {
 }
 
 func (self *ServerSkuCreateTask) taskFail(ctx context.Context, sku *models.SServerSku, err error) {
-	sku.SetStatus(self.UserCred, api.SkuStatusCreatFailed, err.Error())
+	sku.SetStatus(ctx, self.UserCred, api.SkuStatusCreatFailed, err.Error())
 	db.OpsLog.LogEvent(sku, db.ACT_ALLOCATE, err, self.GetUserCred())
 	logclient.AddActionLogWithStartable(self, sku, logclient.ACT_ALLOCATE, err, self.UserCred, false)
 	self.SetStageFailed(ctx, jsonutils.NewString(err.Error()))
@@ -51,38 +51,43 @@ func (self *ServerSkuCreateTask) OnInit(ctx context.Context, obj db.IStandaloneM
 		return
 	}
 
-	provider, err := region.GetCloudprovider()
+	providers, err := region.GetCloudproviders()
 	if err != nil {
-		self.taskFail(ctx, sku, errors.Wrapf(err, "GetCloudprovider"))
+		self.taskFail(ctx, sku, errors.Wrapf(err, "GetCloudproviders"))
 		return
 	}
 
-	driver, err := provider.GetProvider(ctx)
-	if err != nil {
-		self.taskFail(ctx, sku, errors.Wrapf(err, "GetDriver"))
+	for i := range providers {
+		provider := providers[i]
+		driver, err := provider.GetProvider(ctx)
+		if err != nil {
+			self.taskFail(ctx, sku, errors.Wrapf(err, "GetDriver"))
+			return
+		}
+
+		iRegion, err := driver.GetIRegionById(region.ExternalId)
+		if err != nil {
+			self.taskFail(ctx, sku, errors.Wrapf(err, "GetIRegionById"))
+			return
+		}
+
+		opts := cloudprovider.SServerSkuCreateOption{
+			Name:             sku.Name,
+			CpuCount:         sku.CpuCoreCount,
+			VmemSizeMb:       sku.MemorySizeMB,
+			SysDiskMinSizeGb: sku.SysDiskMinSizeGB,
+			SysDiskMaxSizeGb: sku.SysDiskMaxSizeGB,
+		}
+
+		iSku, err := iRegion.CreateISku(&opts)
+		if err != nil {
+			self.taskFail(ctx, sku, errors.Wrapf(err, "CreateISku"))
+			return
+		}
+
+		sku.SyncWithPrivateCloudSku(ctx, self.GetUserCred(), iSku)
+		self.SetStageComplete(ctx, nil)
 		return
 	}
-
-	iRegion, err := driver.GetIRegionById(region.ExternalId)
-	if err != nil {
-		self.taskFail(ctx, sku, errors.Wrapf(err, "GetIRegionById"))
-		return
-	}
-
-	opts := cloudprovider.SServerSkuCreateOption{
-		Name:             sku.Name,
-		CpuCount:         sku.CpuCoreCount,
-		VmemSizeMb:       sku.MemorySizeMB,
-		SysDiskMinSizeGb: sku.SysDiskMinSizeGB,
-		SysDiskMaxSizeGb: sku.SysDiskMaxSizeGB,
-	}
-
-	iSku, err := iRegion.CreateISku(&opts)
-	if err != nil {
-		self.taskFail(ctx, sku, errors.Wrapf(err, "CreateISku"))
-		return
-	}
-
-	sku.SyncWithPrivateCloudSku(ctx, self.GetUserCred(), iSku)
-	self.SetStageComplete(ctx, nil)
+	self.taskFail(ctx, sku, errors.Wrapf(cloudprovider.ErrNotFound, "region %s", region.Name))
 }

@@ -21,10 +21,12 @@ import (
 
 	"yunion.io/x/jsonutils"
 	"yunion.io/x/pkg/errors"
+	"yunion.io/x/pkg/util/sets"
 	"yunion.io/x/pkg/utils"
 	"yunion.io/x/sqlchemy"
 
 	"yunion.io/x/onecloud/pkg/apis"
+	api "yunion.io/x/onecloud/pkg/apis/compute"
 	"yunion.io/x/onecloud/pkg/httperrors"
 	"yunion.io/x/onecloud/pkg/mcclient"
 	"yunion.io/x/onecloud/pkg/util/logclient"
@@ -69,8 +71,8 @@ func (model SStatusResourceBase) GetProgress() float32 {
 	return model.Progress
 }
 
-func StatusBaseSetStatus(model IStatusBaseModel, userCred mcclient.TokenCredential, status string, reason string) error {
-	return statusBaseSetStatus(model, userCred, status, reason)
+func StatusBaseSetStatus(ctx context.Context, model IStatusBaseModel, userCred mcclient.TokenCredential, status string, reason string) error {
+	return statusBaseSetStatus(ctx, model, userCred, status, reason)
 }
 
 func statusBaseSetProgress(model IStatusBaseModel, progress float32) error {
@@ -84,7 +86,7 @@ func statusBaseSetProgress(model IStatusBaseModel, progress float32) error {
 	return nil
 }
 
-func statusBaseSetStatus(model IStatusBaseModel, userCred mcclient.TokenCredential, status string, reason string) error {
+func statusBaseSetStatus(ctx context.Context, model IStatusBaseModel, userCred mcclient.TokenCredential, status string, reason string) error {
 	if model.GetStatus() == status {
 		return nil
 	}
@@ -96,6 +98,7 @@ func statusBaseSetStatus(model IStatusBaseModel, userCred mcclient.TokenCredenti
 	if err != nil {
 		return errors.Wrap(err, "Update")
 	}
+	CallStatusChanegdNotifyHook(ctx, userCred, oldStatus, status, model)
 	if userCred != nil {
 		notes := fmt.Sprintf("%s=>%s", oldStatus, status)
 		if len(reason) > 0 {
@@ -103,7 +106,13 @@ func statusBaseSetStatus(model IStatusBaseModel, userCred mcclient.TokenCredenti
 		}
 		OpsLog.LogEvent(model, ACT_UPDATE_STATUS, notes, userCred)
 		success := true
-		if strings.Contains(status, "fail") || status == apis.STATUS_UNKNOWN {
+		isFail := false
+		for _, sub := range []string{"fail", "crash"} {
+			if strings.Contains(status, sub) {
+				isFail = true
+			}
+		}
+		if isFail || sets.NewString(apis.STATUS_UNKNOWN, api.CLOUD_PROVIDER_DISCONNECTED, api.CONTAINER_STATUS_CRASH_LOOP_BACK_OFF).Has(status) {
 			success = false
 		}
 		logclient.AddSimpleActionLog(model, logclient.ACT_UPDATE_STATUS, notes, userCred, success)
@@ -111,11 +120,11 @@ func statusBaseSetStatus(model IStatusBaseModel, userCred mcclient.TokenCredenti
 	return nil
 }
 
-func StatusBasePerformStatus(model IStatusBaseModel, userCred mcclient.TokenCredential, input apis.PerformStatusInput) error {
+func StatusBasePerformStatus(ctx context.Context, model IStatusBaseModel, userCred mcclient.TokenCredential, input apis.PerformStatusInput) error {
 	if len(input.Status) == 0 {
 		return httperrors.NewMissingParameterError("status")
 	}
-	err := statusBaseSetStatus(model, userCred, input.Status, input.Reason)
+	err := statusBaseSetStatus(ctx, model, userCred, input.Status, input.Reason)
 	if err != nil {
 		return errors.Wrap(err, "statusBaseSetStatus")
 	}

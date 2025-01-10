@@ -24,16 +24,17 @@ import (
 	"yunion.io/x/onecloud/pkg/util/netutils2"
 )
 
-func NewNetplanConfig(allNics []*types.SServerNic, bondNics []*types.SServerNic) *netplan.Configuration {
-	network := newNetplanNetwork(allNics, bondNics)
+func NewNetplanConfig(allNics []*types.SServerNic, bondNics []*types.SServerNic, mainIp string) *netplan.Configuration {
+	network := newNetplanNetwork(allNics, bondNics, mainIp)
 	return netplan.NewConfiguration(network)
 }
 
-func newNetplanNetwork(allNics []*types.SServerNic, bondNics []*types.SServerNic) *netplan.Network {
+func newNetplanNetwork(allNics []*types.SServerNic, bondNics []*types.SServerNic, mainIp string) *netplan.Network {
 	network := netplan.NewNetwork()
 
+	nicCnt := len(allNics) - len(bondNics)
 	for _, nic := range allNics {
-		nicConf := getNetplanEthernetConfig(nic, false)
+		nicConf := getNetplanEthernetConfig(nic, false, mainIp, nicCnt)
 
 		if nicConf == nil {
 			continue
@@ -69,17 +70,14 @@ func newNetplanNetwork(allNics []*types.SServerNic, bondNics []*types.SServerNic
 			network.AddEthernet(sn.Name, nicConf)
 		}
 
-		primaryNic := bondNic.TeamingSlaves[0]
-		netConf := getNetplanEthernetConfig(primaryNic, true)
-		netConf.MacAddress = primaryNic.Mac
+		netConf := getNetplanEthernetConfig(bondNic, true, mainIp, nicCnt)
 
 		if netConf.Mtu == 0 {
 			netConf.Mtu = defaultMtu
 		}
 
 		// TODO: implement kinds of bond mode config
-		// bondConf := netplan.NewBondMode4(netConf, interfaces)
-		bondConf := netplan.NewBondMode1(netConf, interfaces)
+		bondConf := netplan.NewBondMode4(netConf, interfaces)
 
 		network.AddBond(bondNic.Name, bondConf)
 	}
@@ -87,20 +85,35 @@ func newNetplanNetwork(allNics []*types.SServerNic, bondNics []*types.SServerNic
 	return network
 }
 
-func getNetplanEthernetConfig(nic *types.SServerNic, isBond bool) *netplan.EthernetConfig {
+func getNetplanEthernetConfig(nic *types.SServerNic, isBond bool, mainIp string, nicCnt int) *netplan.EthernetConfig {
 	var nicConf *netplan.EthernetConfig
 
 	if !isBond && (nic.TeamingMaster != nil || nic.TeamingSlaves != nil) {
 		return nil
 	} else if nic.Virtual {
 		addr := fmt.Sprintf("%s/32", netutils2.PSEUDO_VIP)
-		nicConf = netplan.NewStaticEthernetConfig(addr, "", nil, nil, nil)
+		nicConf = netplan.NewStaticEthernetConfig(addr, "", "", "", nil, nil, nil)
 	} else if nic.Manual {
 		addr := fmt.Sprintf("%s/%d", nic.Ip, nic.Masklen)
-		gateway := nic.Gateway
+		gateway := ""
+		if nic.Ip == mainIp && len(mainIp) > 0 {
+			gateway = nic.Gateway
+		}
+		addr6 := ""
+		gateway6 := ""
+		if len(nic.Ip6) > 0 {
+			addr6 = fmt.Sprintf("%s/%d", nic.Ip6, nic.Masklen6)
+			if nic.Ip == mainIp && len(mainIp) > 0 {
+				gateway6 = nic.Gateway6
+			}
+		}
+
+		var routeArrs = make([][]string, 0)
+		routeArrs = netutils2.AddNicRoutes(routeArrs, nic, mainIp, nicCnt)
+
 		var routes []*netplan.Route
 
-		for _, route := range nic.Routes {
+		for _, route := range routeArrs {
 			routes = append(routes, &netplan.Route{
 				To:  route[0],
 				Via: route[1],
@@ -108,17 +121,21 @@ func getNetplanEthernetConfig(nic *types.SServerNic, isBond bool) *netplan.Ether
 		}
 
 		nicConf = netplan.NewStaticEthernetConfig(
-			addr, gateway,
+			addr, addr6, gateway, gateway6,
 			[]string{nic.Domain},
 			netutils2.GetNicDns(nic),
 			routes,
 		)
+		nicConf.MacAddress = nic.Mac
 		if nic.Mtu > 0 {
 			nicConf.Mtu = nic.Mtu
 		}
 	} else {
 		// dhcp
 		nicConf = netplan.NewDHCP4EthernetConfig()
+		if len(nic.Ip6) > 0 {
+			nicConf.EnableDHCP6()
+		}
 	}
 
 	return nicConf

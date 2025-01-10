@@ -31,6 +31,7 @@ const (
 	METRIC_RES_TYPE_STORAGE      = "storage"
 	METRIC_RES_TYPE_ELB          = "elb"
 	METRIC_RES_TYPE_K8S          = "k8s"
+	METRIC_RES_TYPE_CONTAINER    = "container"
 
 	//ext is prefix！
 	METRIC_RES_TYPE_JENKINS      = "ext_jenkins"
@@ -40,6 +41,7 @@ const (
 
 	METRIC_UNIT_PERCENT = "%"
 	METRIC_UNIT_BPS     = "bps"
+	METRIC_UNIT_PPS     = "pps"
 	METRIC_UNIT_MBPS    = "Mbps"
 	METRIC_UNIT_BYTEPS  = "Bps"
 	METRIC_UNIT_CPS     = "cps"
@@ -160,4 +162,18 @@ type MetricFieldDetail struct {
 	DisplayName string `json:"display_name"`
 	Unit        string `json:"unit"`
 	Id          string `json:"id"`
+}
+
+type InfluxMeasurement struct {
+	apis.Meta
+	Database               string
+	Measurement            string
+	MeasurementDisplayName string
+	ResType                string
+	Score                  int
+	TagKey                 []string
+	TagValue               map[string][]string
+	FieldKey               []string
+	FieldDescriptions      map[string]MetricFieldDetail
+	Unit                   []string
 }

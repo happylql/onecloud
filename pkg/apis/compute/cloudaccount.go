@@ -66,18 +66,12 @@ type CloudenvResourceListInput struct {
 	// | Ceph      | 2.11       | Ceph对象存储                         |
 	// | Xsky      | 2.11       | XSKY启明星辰Ceph对象存储              |
 	//
-	// enum: OneCloud,VMware,Aliyun,Qcloud,Azure,Aws,Huawei,OpenStack,Ucloud,ZStack,Google,Ctyun,S3,Ceph,Xsky"
+	// enum: ["OneCloud","VMware","Aliyun","Qcloud","Azure","Aws","Huawei","OpenStack","Ucloud","ZStack","Google","Ctyun","S3","Ceph","Xsky"]
 	Providers []string `json:"providers"`
 	// swagger:ignore
 	// Deprecated
 	Provider []string `json:"provider" yunion-deprecated-by:"providers"`
 
-	// 列出指定云平台品牌的资源，一般来说brand和provider相同，除了以上支持的provider之外，还支持以下band
-	//
-	// |   Brand  | Provider | 说明        |
-	// |----------|----------|------------|
-	// | DStack   | ZStack   | 滴滴云私有云 |
-	//
 	Brands []string `json:"brands"`
 	// swagger:ignore
 	// Deprecated
@@ -91,31 +85,31 @@ type CloudenvResourceListInput struct {
 	// | private   | 私有云  |
 	// | onpremise | 本地IDC |
 	//
-	// enum: public,private,onpremise
+	// enum: ["public","private","onpremise"]
 	CloudEnv string `json:"cloud_env"`
 
 	// swagger:ignore
 	// Deprecated
 	// description: this param will be deprecate at 3.0
-	PublicCloud bool `json:"public_cloud"`
+	PublicCloud *bool `json:"public_cloud"`
 	// swagger:ignore
 	// Deprecated
 	// description: this param will be deprecate at 3.0
-	IsPublic bool `json:"is_public"`
+	IsPublic *bool `json:"is_public"`
 
 	// swagger:ignore
 	// Deprecated
 	// description: this param will be deprecate at 3.0
-	PrivateCloud bool `json:"private_cloud"`
+	PrivateCloud *bool `json:"private_cloud"`
 	// swagger:ignore
 	// Deprecated
 	// description: this param will be deprecate at 3.0
-	IsPrivate bool `json:"is_private"`
+	IsPrivate *bool `json:"is_private"`
 
 	// swagger:ignore
 	// Deprecated
 	// description: this param will be deprecate at 3.0
-	IsOnPremise bool `json:"is_on_premise"`
+	IsOnPremise *bool `json:"is_on_premise"`
 
 	// 以平台名称排序
 	// pattern:asc|desc
@@ -137,6 +131,7 @@ type CloudaccountResourceInfo struct {
 	AccountStatus string `json:"account_status,omitempty"`
 	// 云账号监控状态
 	AccountHealthStatus string `json:"account_health_status,omitempty"`
+	AccountReadOnly     bool   `json:"account_read_only,omitempty"`
 }
 
 type CloudaccountCreateInput struct {
@@ -145,7 +140,7 @@ type CloudaccountCreateInput struct {
 	// 指定云平台
 	// Qcloud: 腾讯云
 	// Ctyun: 天翼云
-	// enum: VMware, Aliyun, Qcloud, Azure, Aws, Huawei, OpenStack, Ucloud, ZStack, Google, Ctyun, JDcloud
+	// enum: ["VMware", "Aliyun", "Qcloud", "Azure", "Aws", "Huawei", "OpenStack", "Ucloud", "ZStack", "Google", "Ctyun", "JDcloud"]
 	Provider string `json:"provider"`
 	// swagger:ignore
 	AccountId string
@@ -168,7 +163,7 @@ type CloudaccountCreateInput struct {
 	// | Huawei | Huawei |
 	// | OpenStack | OpenStack |
 	// | Ucloud | Ucloud |
-	// | ZStack | ZStack, DStack |
+	// | ZStack | ZStack |
 	// | Google | Google |
 	// | Ctyun | Ctyun |
 	Brand string `json:"brand"`
@@ -223,6 +218,8 @@ type CloudaccountCreateInput struct {
 	// 货币类型
 	// enmu: CNY, USD
 	Currency string `json:"currency"`
+
+	EnableAutoSyncResource *bool `json:"enable_auto_sync_resource"`
 }
 
 type SProjectMappingResourceInput struct {
@@ -258,6 +255,8 @@ type CloudaccountListInput struct {
 
 	// 账号健康状态
 	HealthStatus []string `json:"health_status"`
+
+	ReadOnly *bool `json:"read_only"`
 
 	// 共享模式
 	ShareMode []string `json:"share_mode"`
@@ -402,6 +401,8 @@ type CloudaccountUpdateInput struct {
 	ReadOnly bool `json:"read_only"`
 
 	Currency string `json:"currency"`
+
+	EnableAutoSyncResource *bool `json:"enable_auto_sync_resource"`
 }
 
 type CloudaccountPerformPublicInput struct {
@@ -524,19 +525,6 @@ type SubscriptonCreateInput struct {
 }
 
 type EnrollmentAccountQuery struct {
-}
-
-type GetCloudaccountSamlOutput struct {
-	// cloudaccount SAML ServiceProvider entity ID
-	EntityId string `json:"entity_id,allowempty"`
-	// redirect login URL for this cloudaccount
-	RedirectLoginUrl string `json:"redirect_login_url,allowempty"`
-	// redirect logout URL for this cloudaccount
-	RedirectLogoutUrl string `json:"redirect_logout_url,allowempty"`
-	// metadata URL for this cloudaccount
-	MetadataUrl string `json:"metadata_url,allowempty"`
-	// initial SAML SSO login URL for this cloudaccount
-	InitLoginUrl string `json:"init_login_url,allowempty"`
 }
 
 type CloudaccountSyncSkusInput struct {

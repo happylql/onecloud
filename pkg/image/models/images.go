@@ -48,6 +48,7 @@ import (
 	"yunion.io/x/onecloud/pkg/cloudcommon/db/quotas"
 	"yunion.io/x/onecloud/pkg/cloudcommon/db/taskman"
 	"yunion.io/x/onecloud/pkg/cloudcommon/notifyclient"
+	common_options "yunion.io/x/onecloud/pkg/cloudcommon/options"
 	deployapi "yunion.io/x/onecloud/pkg/hostman/hostdeployer/apis"
 	"yunion.io/x/onecloud/pkg/hostman/hostdeployer/deployclient"
 	"yunion.io/x/onecloud/pkg/httperrors"
@@ -91,7 +92,10 @@ func init() {
 	}
 	ImageManager.SetVirtualObject(ImageManager)
 
-	imgStreamingWorkerMan = appsrv.NewWorkerManager("image_streaming_worker", 10, 1024, true)
+}
+
+func InitImageStreamWorkers() {
+	imgStreamingWorkerMan = appsrv.NewWorkerManager("image_streaming_worker", options.Options.ImageStreamWorkerCount, 1024, true)
 }
 
 /*
@@ -163,7 +167,7 @@ func (manager *SImageManager) CustomizeHandlerInfo(info *appsrv.SHandlerInfo) {
 
 	switch info.GetName(nil) {
 	case "get_details", "create", "update":
-		info.SetProcessTimeout(time.Minute * 120).SetWorkerManager(imgStreamingWorkerMan)
+		info.SetProcessTimeout(time.Hour * 4).SetWorkerManager(imgStreamingWorkerMan)
 	}
 }
 
@@ -220,7 +224,7 @@ func (self *SImage) CustomizedGetDetailsBody(ctx context.Context, userCred mccli
 
 	if self.IsGuestImage.IsFalse() {
 		formatStr := jsonutils.GetAnyString(query, []string{"format", "disk_format"})
-		if len(formatStr) > 0 {
+		if len(formatStr) > 0 && formatStr != api.IMAGE_DISK_FORMAT_TGZ {
 			subimg := ImageSubformatManager.FetchSubImage(self.Id, formatStr)
 			if subimg != nil {
 				if strings.HasPrefix(subimg.Location, api.LocalFilePrefix) {
@@ -453,7 +457,7 @@ func (self *SImage) unprotectImage() {
 
 func (self *SImage) OnJointFailed(ctx context.Context, userCred mcclient.TokenCredential) {
 	log.Errorf("create joint of image and guest image failed")
-	self.SetStatus(userCred, api.IMAGE_STATUS_KILLED, "")
+	self.SetStatus(ctx, userCred, api.IMAGE_STATUS_KILLED, "")
 	self.unprotectImage()
 }
 
@@ -468,26 +472,26 @@ func (self *SImage) OnSaveTaskFailed(task taskman.ITask, userCred mcclient.Token
 }
 
 func (self *SImage) OnSaveSuccess(ctx context.Context, userCred mcclient.TokenCredential, msg string) {
-	self.SetStatus(userCred, api.IMAGE_STATUS_SAVED, "save success")
+	self.SetStatus(ctx, userCred, api.IMAGE_STATUS_SAVED, "save success")
 	self.saveSuccess(userCred, msg)
 	logclient.AddActionLogWithContext(ctx, self, logclient.ACT_IMAGE_SAVE, msg, userCred, true)
 }
 
 func (self *SImage) OnSaveTaskSuccess(task taskman.ITask, userCred mcclient.TokenCredential, msg string) {
-	self.SetStatus(userCred, api.IMAGE_STATUS_SAVED, "save success")
+	self.SetStatus(context.Background(), userCred, api.IMAGE_STATUS_SAVED, "save success")
 	self.saveSuccess(userCred, msg)
 	logclient.AddActionLogWithStartable(task, self, logclient.ACT_IMAGE_SAVE, msg, userCred, true)
 }
 
 func (self *SImage) saveSuccess(userCred mcclient.TokenCredential, msg string) {
 	// do not set this status, until image converting complete
-	// self.SetStatus(userCred, api.IMAGE_STATUS_ACTIVE, msg)
+	// self.SetStatus(ctx,userCred, api.IMAGE_STATUS_ACTIVE, msg)
 	db.OpsLog.LogEvent(self, db.ACT_SAVE, msg, userCred)
 }
 
 func (self *SImage) saveFailed(userCred mcclient.TokenCredential, msg jsonutils.JSONObject) {
 	log.Errorf("saveFailed: %s", msg.String())
-	self.SetStatus(userCred, api.IMAGE_STATUS_KILLED, msg.String())
+	self.SetStatus(context.Background(), userCred, api.IMAGE_STATUS_KILLED, msg.String())
 	self.unprotectImage()
 	db.OpsLog.LogEvent(self, db.ACT_SAVE_FAIL, msg, userCred)
 }
@@ -536,7 +540,7 @@ func (self *SImage) SaveImageFromStream(reader io.Reader, totalSize int64, calCh
 		format := ""
 		img, err := qemuimg.NewQemuImage(localPath)
 		if err != nil {
-			return err
+			return errors.Wrapf(err, "NewQemuImage %s", localPath)
 		}
 		format = string(img.Format)
 		virtualSizeBytes = img.SizeBytes
@@ -623,7 +627,7 @@ func (self *SImage) PostCreate(ctx context.Context, userCred mcclient.TokenCrede
 	appParams := appsrv.AppContextGetParams(ctx)
 	if appParams.Request.ContentLength > 0 {
 		db.OpsLog.LogEvent(self, db.ACT_SAVING, "create upload", userCred)
-		self.SetStatus(userCred, api.IMAGE_STATUS_SAVING, "create upload")
+		self.SetStatus(ctx, userCred, api.IMAGE_STATUS_SAVING, "create upload")
 
 		err := self.SaveImageFromStream(appParams.Request.Body, appParams.Request.ContentLength, false)
 		if err != nil {
@@ -688,7 +692,7 @@ func (self *SImage) ValidateUpdateData(ctx context.Context, userCred mcclient.To
 			// }
 			if appParams.Request.ContentLength > 0 {
 				// upload image
-				self.SetStatus(userCred, api.IMAGE_STATUS_SAVING, "update start upload")
+				self.SetStatus(ctx, userCred, api.IMAGE_STATUS_SAVING, "update start upload")
 				// If isProbe is true calculating checksum is not necessary wheng saving from stream,
 				// otherwise, it is needed.
 
@@ -812,7 +816,7 @@ func (self *SImage) startDeleteImageTask(ctx context.Context, userCred mcclient.
 	}
 	params.Add(jsonutils.NewString(self.Status), "image_status")
 
-	self.SetStatus(userCred, api.IMAGE_STATUS_DEACTIVATED, "")
+	self.SetStatus(ctx, userCred, api.IMAGE_STATUS_DEACTIVATED, "")
 
 	task, err := taskman.TaskManager.NewTask(ctx, "ImageDeleteTask", self, userCred, params, parentTaskId, "", nil)
 	if err != nil {
@@ -831,7 +835,7 @@ func (self *SImage) startImageCopyFromUrlTask(ctx context.Context, userCred mccl
 	if len(compress) > 0 {
 		msg += " " + compress
 	}
-	self.SetStatus(userCred, api.IMAGE_STATUS_SAVING, msg)
+	self.SetStatus(ctx, userCred, api.IMAGE_STATUS_SAVING, msg)
 	db.OpsLog.LogEvent(self, db.ACT_SAVING, msg, userCred)
 
 	task, err := taskman.TaskManager.NewTask(ctx, "ImageCopyFromUrlTask", self, userCred, params, parentTaskId, "", nil)
@@ -929,9 +933,9 @@ type SImageUsage struct {
 	Size  int64
 }
 
-func (manager *SImageManager) count(scope rbacscope.TRbacScope, ownerId mcclient.IIdentityProvider, status string, isISO tristate.TriState, pendingDelete bool, guestImage tristate.TriState, policyResult rbacutils.SPolicyResult) map[string]SImageUsage {
+func (manager *SImageManager) count(ctx context.Context, scope rbacscope.TRbacScope, ownerId mcclient.IIdentityProvider, status string, isISO tristate.TriState, pendingDelete bool, guestImage tristate.TriState, policyResult rbacutils.SPolicyResult) map[string]SImageUsage {
 	sq := manager.Query("id")
-	sq = db.ObjectIdQueryWithPolicyResult(sq, manager, policyResult)
+	sq = db.ObjectIdQueryWithPolicyResult(ctx, sq, manager, policyResult)
 	switch scope {
 	case rbacscope.ScopeSystem:
 		// do nothing
@@ -1007,19 +1011,19 @@ func expandUsageCount(usages map[string]int64, prefix, imgType, state string, co
 	}
 }
 
-func (manager *SImageManager) Usage(scope rbacscope.TRbacScope, ownerId mcclient.IIdentityProvider, prefix string, policyResult rbacutils.SPolicyResult) map[string]int64 {
+func (manager *SImageManager) Usage(ctx context.Context, scope rbacscope.TRbacScope, ownerId mcclient.IIdentityProvider, prefix string, policyResult rbacutils.SPolicyResult) map[string]int64 {
 	usages := make(map[string]int64)
-	count := manager.count(scope, ownerId, api.IMAGE_STATUS_ACTIVE, tristate.False, false, tristate.False, policyResult)
+	count := manager.count(ctx, scope, ownerId, api.IMAGE_STATUS_ACTIVE, tristate.False, false, tristate.False, policyResult)
 	expandUsageCount(usages, prefix, "img", "", count)
-	count = manager.count(scope, ownerId, api.IMAGE_STATUS_ACTIVE, tristate.True, false, tristate.False, policyResult)
+	count = manager.count(ctx, scope, ownerId, api.IMAGE_STATUS_ACTIVE, tristate.True, false, tristate.False, policyResult)
 	expandUsageCount(usages, prefix, string(qemuimgfmt.ISO), "", count)
-	count = manager.count(scope, ownerId, api.IMAGE_STATUS_ACTIVE, tristate.None, false, tristate.False, policyResult)
+	count = manager.count(ctx, scope, ownerId, api.IMAGE_STATUS_ACTIVE, tristate.None, false, tristate.False, policyResult)
 	expandUsageCount(usages, prefix, "imgiso", "", count)
-	count = manager.count(scope, ownerId, "", tristate.False, true, tristate.False, policyResult)
+	count = manager.count(ctx, scope, ownerId, "", tristate.False, true, tristate.False, policyResult)
 	expandUsageCount(usages, prefix, "img", "pending_delete", count)
-	count = manager.count(scope, ownerId, "", tristate.True, true, tristate.False, policyResult)
+	count = manager.count(ctx, scope, ownerId, "", tristate.True, true, tristate.False, policyResult)
 	expandUsageCount(usages, prefix, string(qemuimgfmt.ISO), "pending_delete", count)
-	count = manager.count(scope, ownerId, "", tristate.None, true, tristate.False, policyResult)
+	count = manager.count(ctx, scope, ownerId, "", tristate.None, true, tristate.False, policyResult)
 	expandUsageCount(usages, prefix, "imgiso", "pending_delete", count)
 	return usages
 }
@@ -1027,6 +1031,8 @@ func (manager *SImageManager) Usage(scope rbacscope.TRbacScope, ownerId mcclient
 func (self *SImage) GetImageType() api.TImageType {
 	if self.DiskFormat == string(qemuimgfmt.ISO) {
 		return api.ImageTypeISO
+	} else if self.DiskFormat == api.IMAGE_DISK_FORMAT_TGZ {
+		return api.ImageTypeTarGzip
 	} else {
 		return api.ImageTypeTemplate
 	}
@@ -1104,7 +1110,7 @@ func (img *SImage) isEncrypted() bool {
 }
 
 func (self *SImage) makeSubImages(ctx context.Context) error {
-	if self.GetImageType() == api.ImageTypeISO {
+	if self.GetImageType() == api.ImageTypeISO || self.GetImageType() == api.ImageTypeTarGzip {
 		// do not convert iso
 		return nil
 	}
@@ -1433,7 +1439,7 @@ func (self *SImage) DoCheckStatus(ctx context.Context, userCred mcclient.TokenCr
 	if IsCheckStatusEnabled(self) {
 		if self.isActive(useFast, true) {
 			if self.Status != api.IMAGE_STATUS_ACTIVE {
-				self.SetStatus(userCred, api.IMAGE_STATUS_ACTIVE, "check active")
+				self.SetStatus(ctx, userCred, api.IMAGE_STATUS_ACTIVE, "check active")
 			}
 			if len(self.FastHash) == 0 {
 				fastHash, err := fileutils2.FastCheckSum(self.GetLocalLocation())
@@ -1469,7 +1475,7 @@ func (self *SImage) DoCheckStatus(ctx context.Context, userCred mcclient.TokenCr
 			}
 		} else {
 			if self.Status != api.IMAGE_STATUS_QUEUED {
-				self.SetStatus(userCred, api.IMAGE_STATUS_QUEUED, "check inactive")
+				self.SetStatus(ctx, userCred, api.IMAGE_STATUS_QUEUED, "check inactive")
 			}
 		}
 	}
@@ -1635,7 +1641,7 @@ func (img *SImage) PerformProbe(ctx context.Context, userCred mcclient.TokenCred
 	if img.Status != api.IMAGE_STATUS_ACTIVE && img.Status != api.IMAGE_STATUS_SAVED {
 		return nil, httperrors.NewInvalidStatusError("cannot probe in status %s", img.Status)
 	}
-	img.SetStatus(userCred, api.IMAGE_STATUS_PROBING, "perform probe")
+	img.SetStatus(ctx, userCred, api.IMAGE_STATUS_PROBING, "perform probe")
 	err := img.StartImagePipeline(ctx, userCred, false)
 	if err != nil {
 		return nil, errors.Wrap(err, "ImageProbeAndCustomization")
@@ -1657,10 +1663,45 @@ func (img *SImage) PerformChangeOwner(ctx context.Context, userCred mcclient.Tok
 	return ret, nil
 }
 
+func UpdateImageConfigTargetImageFormats(ctx context.Context, userCred mcclient.TokenCredential) error {
+	s := auth.GetSession(ctx, userCred, options.Options.Region)
+	serviceId, err := common_options.GetServiceIdByType(s, api.SERVICE_TYPE, "")
+	if err != nil {
+		return errors.Wrap(err, "get service id")
+	}
+
+	defConf, err := common_options.GetServiceConfig(s, serviceId)
+	if err != nil {
+		return errors.Wrap(err, "GetServiceConfig")
+	}
+	targetFormats := make([]string, 0)
+	err = defConf.Unmarshal(&targetFormats, "target_image_formats")
+	if err != nil {
+		return errors.Wrap(err, "get target_image_formats")
+	}
+	if !utils.IsInStringArray(string(qemuimgfmt.VMDK), targetFormats) {
+		targetFormats = append(targetFormats, string(qemuimgfmt.VMDK))
+	}
+	defConfDict := defConf.(*jsonutils.JSONDict)
+	defConfDict.Set("target_image_formats", jsonutils.NewStringArray(targetFormats))
+	nconf := jsonutils.NewDict()
+	nconf.Add(defConfDict, "config", "default")
+	_, err = identity_modules.ServicesV3.PerformAction(s, serviceId, "config", nconf)
+	if err != nil {
+		return errors.Wrap(err, "fail to save config")
+	}
+	return nil
+}
+
 func (m *SImageManager) PerformVmwareAccountAdded(ctx context.Context, userCred mcclient.TokenCredential, query jsonutils.JSONObject, input apis.PerformChangeProjectOwnerInput) (jsonutils.JSONObject, error) {
 	log.Infof("perform vmware account added")
+
 	if !utils.IsInStringArray(string(qemuimgfmt.VMDK), options.Options.TargetImageFormats) {
-		options.Options.TargetImageFormats = append(options.Options.TargetImageFormats, string(qemuimgfmt.VMDK))
+		if err := UpdateImageConfigTargetImageFormats(ctx, userCred); err != nil {
+			log.Errorf("failed update target_image_formats %s", err)
+		} else {
+			options.Options.TargetImageFormats = append(options.Options.TargetImageFormats, string(qemuimgfmt.VMDK))
+		}
 	}
 	return nil, nil
 }
@@ -1823,13 +1864,13 @@ func (image *SImage) doUploadPermanentStorage(ctx context.Context, userCred mccl
 	uploaded := false
 	if image.isLocal() {
 		imagePath := image.GetLocalLocation()
-		image.SetStatus(userCred, api.IMAGE_STATUS_SAVING, "save image to specific storage")
+		image.SetStatus(ctx, userCred, api.IMAGE_STATUS_SAVING, "save image to specific storage")
 		storage := GetStorage()
-		location, err := storage.SaveImage(ctx, imagePath)
+		location, err := storage.SaveImage(ctx, imagePath, nil)
 		if err != nil {
 			log.Errorf("Failed save image to specific storage %s", err)
 			errStr := fmt.Sprintf("save image to storage %s: %v", storage.Type(), err)
-			image.SetStatus(userCred, api.IMAGE_STATUS_SAVE_FAIL, errStr)
+			image.SetStatus(ctx, userCred, api.IMAGE_STATUS_SAVE_FAIL, errStr)
 			return false, errors.Wrapf(err, "save image to storage %s", storage.Type())
 		}
 		if location != image.Location {
@@ -1848,7 +1889,7 @@ func (image *SImage) doUploadPermanentStorage(ctx context.Context, userCred mccl
 				log.Errorf("failed remove file %s: %s", imagePath, err)
 			}
 		}
-		image.SetStatus(userCred, api.IMAGE_STATUS_ACTIVE, "save image to specific storage complete")
+		image.SetStatus(ctx, userCred, api.IMAGE_STATUS_ACTIVE, "save image to specific storage complete")
 	}
 
 	subimgs := ImageSubformatManager.GetAllSubImages(image.Id)
@@ -1868,7 +1909,7 @@ func (image *SImage) doUploadPermanentStorage(ctx context.Context, userCred mccl
 		} else {
 			imagePath := subimgs[i].GetLocalLocation()
 			storage := GetStorage()
-			location, err := GetStorage().SaveImage(ctx, imagePath)
+			location, err := GetStorage().SaveImage(ctx, imagePath, nil)
 			if err != nil {
 				log.Errorf("Failed save image to sepcific storage %s", err)
 				subimgs[i].SetStatus(api.IMAGE_STATUS_SAVE_FAIL)
@@ -2059,7 +2100,7 @@ func (img *SImage) Pipeline(ctx context.Context, userCred mcclient.TokenCredenti
 		}
 	}
 	if img.Status != api.IMAGE_STATUS_ACTIVE {
-		img.SetStatus(userCred, api.IMAGE_STATUS_ACTIVE, "image pipeline complete")
+		img.SetStatus(ctx, userCred, api.IMAGE_STATUS_ACTIVE, "image pipeline complete")
 	}
 	if updated && img.IsGuestImage.IsFalse() {
 		kwargs := jsonutils.NewDict()

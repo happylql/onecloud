@@ -19,6 +19,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha1"
+	"crypto/tls"
 	"encoding/base64"
 	"fmt"
 	"io"
@@ -215,6 +216,12 @@ type loggingResponseWriter struct {
 	http.ResponseWriter
 	status int
 	data   []byte
+}
+
+func (lrw *loggingResponseWriter) Flush() {
+	if fw, ok := lrw.ResponseWriter.(http.Flusher); ok {
+		fw.Flush()
+	}
 }
 
 func (lrw *loggingResponseWriter) Write(data []byte) (int, error) {
@@ -434,7 +441,7 @@ func (app *Application) defaultHandle(w http.ResponseWriter, r *http.Request, ri
 		}
 	} else if !isCors {
 		ctx := appctx.WithRequestLang(context.TODO(), r)
-		httperrors.NotFoundError(ctx, w, "Handler not found")
+		httperrors.NotFoundError(ctx, w, "Handler %s not found", "/"+strings.Join(segs, "/"))
 	}
 	return nil, nil
 }
@@ -475,6 +482,11 @@ func (app *Application) initServer(addr string) *http.Server {
 	}
 	*/
 
+	cipherSuites := []uint16{}
+	for _, suite := range tls.CipherSuites() {
+		cipherSuites = append(cipherSuites, suite.ID)
+	}
+
 	s := &http.Server{
 		Addr:              addr,
 		Handler:           app,
@@ -486,6 +498,10 @@ func (app *Application) initServer(addr string) *http.Server {
 		// fix aliyun elb healt check tls error
 		// issue like: https://github.com/megaease/easegress/issues/481
 		ErrorLog: olog.New(io.Discard, "", olog.LstdFlags),
+
+		TLSConfig: &tls.Config{
+			CipherSuites: cipherSuites,
+		},
 	}
 	return s
 }

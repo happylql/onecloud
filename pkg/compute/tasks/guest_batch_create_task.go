@@ -138,6 +138,14 @@ func (task *GuestBatchCreateTask) allocateGuestOnHost(ctx context.Context, guest
 		}
 	}
 
+	if len(candidate.CpuNumaPin) > 0 {
+		if err := guest.SetCpuNumaPin(ctx, task.UserCred, candidate.CpuNumaPin, nil); err != nil {
+			log.Errorf("SetCpuNumaPin fail %s", err)
+			guest.SetStatus(ctx, task.UserCred, api.VM_CREATE_FAILED, err.Error())
+			return err
+		}
+	}
+
 	host, _ := guest.GetHost()
 
 	quotaCpuMem := models.SQuota{Count: 1, Cpu: int(guest.VcpuCount), Memory: guest.VmemSize}
@@ -152,7 +160,7 @@ func (task *GuestBatchCreateTask) allocateGuestOnHost(ctx context.Context, guest
 	input, err := task.GetCreateInput(data)
 	if err != nil {
 		log.Errorf("GetCreateInput fail %s", err)
-		guest.SetStatus(task.UserCred, api.VM_CREATE_FAILED, err.Error())
+		guest.SetStatus(ctx, task.UserCred, api.VM_CREATE_FAILED, err.Error())
 		return err
 	}
 
@@ -160,7 +168,7 @@ func (task *GuestBatchCreateTask) allocateGuestOnHost(ctx context.Context, guest
 		input, err = host.SetGuestCreateNetworkAndDiskParams(ctx, task.UserCred, input)
 		if err != nil {
 			log.Errorf("host.SetGuestCreateNetworkAndDiskParams fail %s", err)
-			guest.SetStatus(task.UserCred, api.VM_CREATE_FAILED, err.Error())
+			guest.SetStatus(ctx, task.UserCred, api.VM_CREATE_FAILED, err.Error())
 			return err
 		}
 		// params := input.JSON(input)
@@ -169,7 +177,7 @@ func (task *GuestBatchCreateTask) allocateGuestOnHost(ctx context.Context, guest
 
 	/*input, err = task.GetCreateInput(data)
 	if err != nil {
-		guest.SetStatus(task.UserCred, api.VM_CREATE_FAILED, err.Error())
+		guest.SetStatus(ctx,task.UserCred, api.VM_CREATE_FAILED, err.Error())
 		return err
 	}*/
 
@@ -181,7 +189,7 @@ func (task *GuestBatchCreateTask) allocateGuestOnHost(ctx context.Context, guest
 	task.SetPendingUsage(&pendingRegionUsage, 1)
 	if err != nil {
 		log.Errorf("Network failed: %s", err)
-		guest.SetStatus(task.UserCred, api.VM_NETWORK_FAILED, err.Error())
+		guest.SetStatus(ctx, task.UserCred, api.VM_NETWORK_FAILED, err.Error())
 		return err
 	}
 
@@ -204,17 +212,23 @@ func (task *GuestBatchCreateTask) allocateGuestOnHost(ctx context.Context, guest
 		task.SetPendingUsage(&pendingRegionUsage, 1)
 		if err != nil {
 			log.Errorf("guest.CreateElasticipOnHost failed: %s", err)
-			guest.SetStatus(task.UserCred, api.VM_NETWORK_FAILED, err.Error())
+			guest.SetStatus(ctx, task.UserCred, api.VM_NETWORK_FAILED, err.Error())
 			return err
 		}
 		input.Eip = eip.Id
 	}
 
+	drv, err := guest.GetDriver()
+	if err != nil {
+		guest.SetStatus(ctx, task.UserCred, api.VM_DISK_FAILED, err.Error())
+		return err
+	}
+
 	// allocate disks
-	extraDisks, err := guest.GetDriver().PrepareDiskRaidConfig(task.UserCred, host, input.BaremetalDiskConfigs, input.Disks)
+	extraDisks, err := drv.PrepareDiskRaidConfig(task.UserCred, host, input.BaremetalDiskConfigs, input.Disks)
 	if err != nil {
 		log.Errorf("PrepareDiskRaidConfig fail: %s", err)
-		guest.SetStatus(task.UserCred, api.VM_DISK_FAILED, err.Error())
+		guest.SetStatus(ctx, task.UserCred, api.VM_DISK_FAILED, err.Error())
 		return err
 	}
 	if len(extraDisks) > 0 {
@@ -231,7 +245,7 @@ func (task *GuestBatchCreateTask) allocateGuestOnHost(ctx context.Context, guest
 
 	if err != nil {
 		log.Errorf("Disk create failed: %s", err)
-		guest.SetStatus(task.UserCred, api.VM_DISK_FAILED, err.Error())
+		guest.SetStatus(ctx, task.UserCred, api.VM_DISK_FAILED, err.Error())
 		return err
 	}
 
@@ -240,7 +254,7 @@ func (task *GuestBatchCreateTask) allocateGuestOnHost(ctx context.Context, guest
 	task.SetPendingUsage(&pendingUsage, 0)
 	if err != nil {
 		log.Errorf("IsolatedDevices create failed: %s", err)
-		guest.SetStatus(task.UserCred, api.VM_DEVICE_FAILED, err.Error())
+		guest.SetStatus(ctx, task.UserCred, api.VM_DEVICE_FAILED, err.Error())
 		return err
 	}
 
@@ -249,7 +263,7 @@ func (task *GuestBatchCreateTask) allocateGuestOnHost(ctx context.Context, guest
 		err := guest.JoinGroups(ctx, task.UserCred, input.InstanceGroupIds)
 		if err != nil {
 			log.Errorf("Join Groups failed: %v", err)
-			guest.SetStatus(task.UserCred, api.VM_CREATE_FAILED, err.Error())
+			guest.SetStatus(ctx, task.UserCred, api.VM_CREATE_FAILED, err.Error())
 			return err
 		}
 	}
@@ -258,7 +272,7 @@ func (task *GuestBatchCreateTask) allocateGuestOnHost(ctx context.Context, guest
 		err := host.RebuildRecycledGuest(ctx, task.UserCred, guest)
 		if err != nil {
 			log.Errorf("start guest create task fail %s", err)
-			guest.SetStatus(task.UserCred, api.VM_CREATE_FAILED, err.Error())
+			guest.SetStatus(ctx, task.UserCred, api.VM_CREATE_FAILED, err.Error())
 			return err
 		}
 
@@ -274,7 +288,7 @@ func (task *GuestBatchCreateTask) allocateGuestOnHost(ctx context.Context, guest
 		err = guest.StartRebuildRootTask(ctx, task.UserCred, "", false, autoStart, true, deployInput)
 		if err != nil {
 			log.Errorf("start guest create task fail %s", err)
-			guest.SetStatus(task.UserCred, api.VM_CREATE_FAILED, err.Error())
+			guest.SetStatus(ctx, task.UserCred, api.VM_CREATE_FAILED, err.Error())
 			return err
 		}
 		return nil
@@ -283,7 +297,7 @@ func (task *GuestBatchCreateTask) allocateGuestOnHost(ctx context.Context, guest
 	err = guest.StartGuestCreateTask(ctx, task.UserCred, input, nil, task.GetId())
 	if err != nil {
 		log.Errorf("start guest create task fail %s", err)
-		guest.SetStatus(task.UserCred, api.VM_CREATE_FAILED, err.Error())
+		guest.SetStatus(ctx, task.UserCred, api.VM_CREATE_FAILED, err.Error())
 		return err
 	}
 	return nil

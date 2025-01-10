@@ -122,9 +122,12 @@ func init() {
 	cmd.Perform("reset-nic-traffic-limit", &options.ServerNicTrafficLimitOptions{})
 	cmd.Perform("set-nic-traffic-limit", &options.ServerNicTrafficLimitOptions{})
 	cmd.Perform("add-sub-ips", &options.ServerAddSubIpsOptions{})
+	cmd.Perform("update-sub-ips", &options.ServerUpdateSubIpsOptions{})
 	cmd.BatchPerform("set-os-info", &options.ServerSetOSInfoOptions{})
 	cmd.BatchPerform("start-rescue", &options.ServerStartOptions{})
 	cmd.BatchPerform("stop-rescue", &options.ServerStartOptions{})
+	cmd.BatchPerform("sync-os-info", &options.ServerIdsOptions{})
+	cmd.BatchPerform("set-root-disk-matcher", &options.ServerSetRootDiskMatcher{})
 
 	cmd.Get("vnc", new(options.ServerVncOptions))
 	cmd.Get("desc", new(options.ServerIdOptions))

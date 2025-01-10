@@ -94,10 +94,7 @@ type SCloudaccountCredential struct {
 	OracleUserOCID    string `json:"oracle_user_ocid"`
 	OraclePrivateKey  string `json:"oracle_private_key"`
 
-	// 默认区域Id, Apara及HCSO需要此参数
-	// example: cn-north-2
-	// required: true
-	DefaultRegion string `default:"$DEFAULT_REGION" metavar:"$DEFAULT_REGION"`
+	RegionId string
 
 	// Huawei Cloud Stack Online
 	*SHCSOEndpoints
@@ -166,9 +163,9 @@ type ProviderConfig struct {
 
 	Options *jsonutils.JSONDict
 
-	DefaultRegion string
-	ProxyFunc     httputils.TransportProxyFunc
-	Debug         bool
+	RegionId  string
+	ProxyFunc httputils.TransportProxyFunc
+	Debug     bool
 
 	// 仅用来检测cloudpods是否纳管自身环境(system项目id)
 	AdminProjectId string
@@ -203,6 +200,7 @@ type ICloudProviderFactory interface {
 
 	ValidateChangeBandwidth(instanceId string, bandwidth int64) error
 	ValidateCreateCloudaccountData(ctx context.Context, input SCloudaccountCredential) (SCloudaccount, error)
+	IsReadOnly() bool
 	ValidateUpdateCloudaccountCredential(ctx context.Context, input SCloudaccountCredential, cloudaccount string) (SCloudaccount, error)
 	GetSupportedBrands() []string
 
@@ -217,18 +215,6 @@ type ICloudProviderFactory interface {
 	GetMaxCloudEventKeepDays() int
 
 	IsNeedForceAutoCreateProject() bool
-
-	IsCloudpolicyWithSubscription() bool     // 自定义权限属于订阅级别资源
-	IsClouduserpolicyWithSubscription() bool // 绑定用户权限需要指定订阅
-
-	IsSupportCloudIdService() bool
-	IsSupportClouduserPolicy() bool
-	IsSupportResetClouduserPassword() bool
-	GetClouduserMinPolicyCount() int
-	IsClouduserNeedInitPolicy() bool
-	IsSupportCreateCloudgroup() bool
-
-	IsSystemCloudpolicyUnified() bool // 国内国外权限是否一致
 
 	IsSupportCrossCloudEnvVpcPeering() bool
 	IsSupportCrossRegionVpcPeering() bool
@@ -261,7 +247,7 @@ type ICloudProvider interface {
 	GetVersion() string
 	GetIamLoginUrl() string
 
-	GetIRegions() []ICloudRegion
+	GetIRegions() ([]ICloudRegion, error)
 	GetIProjects() ([]ICloudProject, error)
 	CreateIProject(name string) (ICloudProject, error)
 	GetIRegionById(id string) (ICloudRegion, error)
@@ -285,8 +271,7 @@ type ICloudProvider interface {
 
 	IsClouduserSupportPassword() bool
 	GetICloudusers() ([]IClouduser, error)
-	GetISystemCloudpolicies() ([]ICloudpolicy, error)
-	GetICustomCloudpolicies() ([]ICloudpolicy, error)
+	GetICloudpolicies() ([]ICloudpolicy, error)
 	GetICloudgroups() ([]ICloudgroup, error)
 	GetICloudgroupByName(name string) (ICloudgroup, error)
 	CreateICloudgroup(name, desc string) (ICloudgroup, error)
@@ -514,11 +499,7 @@ func (self *SBaseProvider) CreateICloudgroup(name, desc string) (ICloudgroup, er
 	return nil, ErrNotImplemented
 }
 
-func (self *SBaseProvider) GetISystemCloudpolicies() ([]ICloudpolicy, error) {
-	return nil, ErrNotImplemented
-}
-
-func (self *SBaseProvider) GetICustomCloudpolicies() ([]ICloudpolicy, error) {
+func (self *SBaseProvider) GetICloudpolicies() ([]ICloudpolicy, error) {
 	return nil, ErrNotImplemented
 }
 
@@ -678,40 +659,10 @@ func GetPrivateProviders() []string {
 	return providers
 }
 
-func GetSupportCloudgroupProviders() []string {
-	providers := []string{}
-	for p, d := range providerTable {
-		if d.IsSupportCreateCloudgroup() {
-			providers = append(providers, p)
-		}
-	}
-	return providers
-}
-
 func GetOnPremiseProviders() []string {
 	providers := make([]string, 0)
 	for p, d := range providerTable {
 		if !d.IsPublicCloud() && d.IsOnPremise() {
-			providers = append(providers, p)
-		}
-	}
-	return providers
-}
-
-func GetSupportCloudIdProvider() []string {
-	providers := []string{}
-	for p, d := range providerTable {
-		if d.IsSupportCloudIdService() {
-			providers = append(providers, p)
-		}
-	}
-	return providers
-}
-
-func GetClouduserpolicyWithSubscriptionProviders() []string {
-	providers := []string{}
-	for p, d := range providerTable {
-		if d.IsClouduserpolicyWithSubscription() {
 			providers = append(providers, p)
 		}
 	}
@@ -759,6 +710,10 @@ func (factory *baseProviderFactory) IsMultiTenant() bool {
 	return false
 }
 
+func (factory *baseProviderFactory) IsReadOnly() bool {
+	return false
+}
+
 func (factory *baseProviderFactory) IsCloudeventRegional() bool {
 	return false
 }
@@ -773,43 +728,6 @@ func (factory *baseProviderFactory) GetMaxCloudEventKeepDays() int {
 
 func (factory *baseProviderFactory) IsNeedForceAutoCreateProject() bool {
 	return false
-}
-
-func (factory *baseProviderFactory) IsCloudpolicyWithSubscription() bool {
-	return false
-}
-
-func (factory *baseProviderFactory) IsClouduserpolicyWithSubscription() bool {
-	return false
-}
-
-func (factory *baseProviderFactory) IsSupportCloudIdService() bool {
-	return false
-}
-
-func (factory *baseProviderFactory) IsSupportClouduserPolicy() bool {
-	return true
-}
-
-func (factory *baseProviderFactory) IsSupportResetClouduserPassword() bool {
-	return true
-}
-
-func (factory *baseProviderFactory) IsClouduserNeedInitPolicy() bool {
-	return false
-}
-
-func (factory *baseProviderFactory) GetClouduserMinPolicyCount() int {
-	// unlimited
-	return -1
-}
-
-func (factory *baseProviderFactory) IsSupportCreateCloudgroup() bool {
-	return false
-}
-
-func (factory *baseProviderFactory) IsSystemCloudpolicyUnified() bool {
-	return true
 }
 
 func (factory *baseProviderFactory) IsSupportCrossCloudEnvVpcPeering() bool {

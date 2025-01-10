@@ -16,7 +16,6 @@ package proxmox
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/url"
 	"regexp"
@@ -29,6 +28,7 @@ import (
 	"yunion.io/x/pkg/util/osprofile"
 	"yunion.io/x/pkg/utils"
 
+	"yunion.io/x/cloudmux/pkg/apis"
 	api "yunion.io/x/cloudmux/pkg/apis/compute"
 	"yunion.io/x/cloudmux/pkg/cloudprovider"
 	"yunion.io/x/cloudmux/pkg/multicloud"
@@ -171,7 +171,10 @@ type SInstance struct {
 }
 
 func (self *SInstance) GetName() string {
-	return self.Name
+	if len(self.Name) > 0 {
+		return self.Name
+	}
+	return self.GetId()
 }
 
 func (self *SInstance) GetId() string {
@@ -245,8 +248,8 @@ func (self *SInstance) DeleteVM(ctx context.Context) error {
 	return self.host.zone.region.DeleteVM(self.VmID)
 }
 
-func (self *SInstance) DeployVM(ctx context.Context, name string, username string, password string, publicKey string, deleteKeypair bool, description string) error {
-	return self.host.zone.region.ResetVmPassword(self.VmID, username, password)
+func (self *SInstance) DeployVM(ctx context.Context, opts *cloudprovider.SInstanceDeployOptions) error {
+	return self.host.zone.region.ResetVmPassword(self.VmID, opts.Username, opts.Password)
 }
 
 func (self *SInstance) DetachDisk(ctx context.Context, diskId string) error {
@@ -285,7 +288,7 @@ func (self *SInstance) GetError() error {
 }
 
 func (self *SInstance) GetHostname() string {
-	return self.GetName()
+	return ""
 }
 
 func (self *SInstance) GetHypervisor() string {
@@ -394,7 +397,10 @@ func (self *SInstance) GetOsType() cloudprovider.TOsType {
 }
 
 func (ins *SInstance) GetOsArch() string {
-	return "x86_64"
+	if utils.IsInStringArray(ins.QemuCpu, []string{"neoverse-n1"}) || strings.HasPrefix(ins.QemuCpu, "cortex-a") {
+		return apis.OS_ARCH_AARCH64
+	}
+	return ins.host.GetCpuArchitecture()
 }
 
 func (ins *SInstance) GetOsDist() string {
@@ -545,11 +551,8 @@ func (self *SRegion) GetQemuConfig(node string, VmId int) (*SInstance, error) {
 	if err != nil {
 		return nil, err
 	}
-	byteArr, err := json.Marshal(&vmConfig)
-	if err != nil {
-		return nil, err
-	}
-	err = json.Unmarshal(byteArr, &vmBase)
+
+	err = jsonutils.Update(vmBase, vmConfig)
 	if err != nil {
 		return nil, err
 	}
@@ -822,9 +825,11 @@ func (self *SRegion) GetInstances(hostId string) ([]SInstance, error) {
 	for _, res := range resources {
 		if res.NodeId == hostId || len(hostId) == 0 {
 			instance, err := self.GetQemuConfig(res.Node, res.VmId)
-			if err == nil {
-				ret = append(ret, *instance)
+			if err != nil {
+				log.Warningf("get pve vm %s %d error: %v", res.Node, res.VmId, err)
+				continue
 			}
+			ret = append(ret, *instance)
 		}
 	}
 

@@ -16,6 +16,7 @@ package tasks
 
 import (
 	"context"
+	"strings"
 
 	"yunion.io/x/jsonutils"
 	"yunion.io/x/log"
@@ -41,20 +42,20 @@ func (self *CloudAccountSyncInfoTask) OnInit(ctx context.Context, obj db.IStanda
 	cloudaccount := obj.(*models.SCloudaccount)
 
 	if cloudaccount.Provider == api.CLOUD_PROVIDER_VMWARE {
-		cloudaccount.SetStatus(self.UserCred, api.CLOUD_PROVIDER_SYNC_NETWORK, "StartSyncVMwareNetworkTask")
+		cloudaccount.SetStatus(ctx, self.UserCred, api.CLOUD_PROVIDER_SYNC_NETWORK, "StartSyncVMwareNetworkTask")
 		zone, _ := self.Params.GetString("zone")
 		err := cloudaccount.PrepareEsxiHostNetwork(ctx, self.UserCred, zone)
 		if err != nil {
 			d := jsonutils.NewDict()
 			d.Set("error", jsonutils.NewString(err.Error()))
 			db.OpsLog.LogEvent(cloudaccount, db.ACT_SYNC_NETWORK_FAILED, d, self.UserCred)
-			cloudaccount.SetStatus(self.UserCred, api.CLOUD_PROVIDER_SYNC_NETWORK_FAILED, "sync network failed")
+			cloudaccount.SetStatus(ctx, self.UserCred, api.CLOUD_PROVIDER_SYNC_NETWORK_FAILED, "sync network failed")
 			logclient.AddActionLogWithStartable(self, cloudaccount, logclient.ACT_CLOUDACCOUNT_SYNC_NETWORK, d, self.UserCred, false)
 			cloudaccount.MarkEndSync(self.UserCred)
 			self.SetStageFailed(ctx, d)
 			return
 		} else {
-			cloudaccount.SetStatus(self.UserCred, api.CLOUD_PROVIDER_INIT, "sync network sucess")
+			cloudaccount.SetStatus(ctx, self.UserCred, api.CLOUD_PROVIDER_INIT, "sync network sucess")
 			logclient.AddActionLogWithStartable(self, cloudaccount, logclient.ACT_CLOUDACCOUNT_SYNC_NETWORK, cloudaccount.GetShortDesc(ctx), self.UserCred, true)
 		}
 	}
@@ -80,9 +81,11 @@ func (self *CloudAccountSyncInfoTask) OnInit(ctx context.Context, obj db.IStanda
 
 func (self *CloudAccountSyncInfoTask) OnCloudaccountSyncReadyFailed(ctx context.Context, obj db.IStandaloneModel, err jsonutils.JSONObject) {
 	cloudaccount := obj.(*models.SCloudaccount)
-	db.OpsLog.LogEvent(cloudaccount, db.ACT_SYNC_HOST_FAILED, err, self.UserCred)
+	if !strings.Contains(err.String(), "ConflictError") {
+		db.OpsLog.LogEvent(cloudaccount, db.ACT_SYNC_HOST_FAILED, err, self.UserCred)
+		logclient.AddActionLogWithStartable(self, cloudaccount, logclient.ACT_CLOUD_SYNC, err, self.UserCred, false)
+	}
 	self.SetStageFailed(ctx, err)
-	logclient.AddActionLogWithStartable(self, cloudaccount, logclient.ACT_CLOUD_SYNC, err, self.UserCred, false)
 }
 
 func (self *CloudAccountSyncInfoTask) OnCloudaccountSyncReady(ctx context.Context, obj db.IStandaloneModel, body jsonutils.JSONObject) {
@@ -100,11 +103,6 @@ func (self *CloudAccountSyncInfoTask) OnCloudaccountSyncReady(ctx context.Contex
 	if !syncRange.NeedSyncInfo() {
 		self.OnCloudaccountSyncComplete(ctx, obj, nil)
 		return
-	}
-
-	err := models.SyncCloudaccountResources(ctx, self.GetUserCred(), cloudaccount, &syncRange)
-	if err != nil {
-		log.Errorf("SyncAccountResources error: %v", err)
 	}
 
 	cloudproviders := cloudaccount.GetEnabledCloudproviders()

@@ -131,6 +131,7 @@ type SInstance struct {
 	SecurityGroupIds    []string            //	实例所属安全组。该参数可以通过调用 DescribeSecurityGroups 的返回值中的sgId字段来获取。
 	LoginSettings       LoginSettings       //实例登录设置。目前只返回实例所关联的密钥。
 	InstanceState       string              //	实例状态。取值范围：PENDING：表示创建中 LAUNCH_FAILED：表示创建失败 RUNNING：表示运行中 STOPPED：表示关机 STARTING：表示开机中 STOPPING：表示关机中 REBOOTING：表示重启中 SHUTDOWN：表示停止待销毁 TERMINATING：表示销毁中。
+	IPv6Addresses       []string
 	Tags                []Tag
 }
 
@@ -197,7 +198,7 @@ func (self *SInstance) GetName() string {
 }
 
 func (self *SInstance) GetHostname() string {
-	return self.GetName()
+	return ""
 }
 
 func (self *SInstance) GetGlobalId() string {
@@ -213,7 +214,7 @@ func (self *SInstance) GetInstanceType() string {
 }
 
 func (self *SInstance) getVpc() (*SVpc, error) {
-	return self.host.zone.region.getVpc(self.VirtualPrivateCloud.VpcId)
+	return self.host.zone.region.GetVpc(self.VirtualPrivateCloud.VpcId)
 }
 
 func (self *SInstance) GetIDisks() ([]cloudprovider.ICloudDisk, error) {
@@ -300,6 +301,12 @@ func (self *SInstance) GetINics() ([]cloudprovider.ICloudNic, error) {
 		for _, addr := range networkInterface.PrivateIpAddressSet {
 			if addr.Primary {
 				nic.ipAddr = addr.PrivateIpAddress
+			}
+		}
+		for _, addr := range networkInterface.Ipv6AddressSet {
+			if len(addr.Address) > 0 {
+				nic.ip6Addr = addr.Address
+				break
 			}
 		}
 		ret = append(ret, nic)
@@ -457,17 +464,8 @@ func (self *SInstance) UpdateVM(ctx context.Context, input cloudprovider.SInstan
 	return self.host.zone.region.UpdateVM(self.InstanceId, input.NAME)
 }
 
-func (self *SInstance) DeployVM(ctx context.Context, name string, username string, password string, publicKey string, deleteKeypair bool, description string) error {
-	var keypairName string
-	if len(publicKey) > 0 {
-		var err error
-		keypairName, err = self.host.zone.region.syncKeypair(publicKey)
-		if err != nil {
-			return err
-		}
-	}
-
-	return self.host.zone.region.DeployVM(self.InstanceId, name, password, keypairName, deleteKeypair, description)
+func (self *SInstance) DeployVM(ctx context.Context, opts *cloudprovider.SInstanceDeployOptions) error {
+	return self.host.zone.region.DeployVM(self.InstanceId, opts)
 }
 
 func (self *SInstance) RebuildRoot(ctx context.Context, desc *cloudprovider.SManagedVMRebuildRootConfig) (string, error) {
@@ -494,34 +492,8 @@ func (self *SInstance) RebuildRoot(ctx context.Context, desc *cloudprovider.SMan
 	return instance.SystemDisk.DiskId, nil
 }
 
-func (self *SInstance) ChangeConfig(ctx context.Context, config *cloudprovider.SManagedVMChangeConfig) error {
-	instanceTypes := []string{}
-	if len(config.InstanceType) > 0 {
-		instanceTypes = []string{config.InstanceType}
-	} else {
-		specs, err := self.host.zone.region.GetMatchInstanceTypes(config.Cpu, config.MemoryMB, 0, self.Placement.Zone)
-		if err != nil {
-			return errors.Wrapf(err, "GetMatchInstanceTypes")
-		}
-		for _, spec := range specs {
-			instanceTypes = append(instanceTypes, spec.InstanceType)
-		}
-	}
-
-	var err error
-	for _, instanceType := range instanceTypes {
-		err = self.host.zone.region.ChangeVMConfig(self.InstanceId, instanceType)
-		if err != nil {
-			log.Errorf("ChangeConfig for %s with %s error: %v", self.InstanceId, instanceType, err)
-			continue
-		}
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-
-	return fmt.Errorf("Failed to change vm config, specification not supported")
+func (self *SInstance) ChangeConfig(ctx context.Context, opts *cloudprovider.SManagedVMChangeConfig) error {
+	return self.host.zone.region.ChangeVMConfig(self.InstanceId, opts.InstanceType)
 }
 
 func (self *SInstance) AttachDisk(ctx context.Context, diskId string) error {
@@ -747,28 +719,17 @@ func (self *SRegion) StopVM(instanceId string, opts *cloudprovider.ServerStopOpt
 }
 
 func (self *SRegion) DeleteVM(instanceId string) error {
-	status, err := self.GetInstanceStatus(instanceId)
-	if err != nil {
-		if errors.Cause(err) == cloudprovider.ErrNotFound {
-			return nil
-		}
-		return errors.Wrapf(err, "self.GetInstanceStatus")
-	}
-	log.Debugf("Instance status on delete is %s", status)
-	if status != InstanceStatusStopped {
-		log.Warningf("DeleteVM: vm status is %s expect %s", status, InstanceStatusStopped)
-	}
 	return self.doDeleteVM(instanceId)
 }
 
-func (self *SRegion) DeployVM(instanceId string, name string, password string, keypairName string, deleteKeypair bool, description string) error {
+func (self *SRegion) DeployVM(instanceId string, opts *cloudprovider.SInstanceDeployOptions) error {
 	instance, err := self.GetInstance(instanceId)
 	if err != nil {
 		return err
 	}
 
 	// 修改密钥时直接返回
-	if deleteKeypair {
+	if opts.DeleteKeypair {
 		for i := 0; i < len(instance.LoginSettings.KeyIds); i++ {
 			err = self.DetachKeyPair(instanceId, instance.LoginSettings.KeyIds[i])
 			if err != nil {
@@ -777,32 +738,30 @@ func (self *SRegion) DeployVM(instanceId string, name string, password string, k
 		}
 	}
 
-	if len(keypairName) > 0 {
+	if len(opts.PublicKey) > 0 {
+		keypairName, err := self.syncKeypair(opts.PublicKey)
+		if err != nil {
+			return err
+		}
 		err = self.AttachKeypair(instanceId, keypairName)
 		if err != nil {
 			return err
 		}
 	}
 
-	params := make(map[string]string)
-
-	if len(name) > 0 && instance.InstanceName != name {
-		params["InstanceName"] = name
-	}
-
-	if len(params) > 0 {
-		err := self.modifyInstanceAttribute(instanceId, params)
-		if err != nil {
-			return err
-		}
-	}
-	if len(password) > 0 {
-		return self.instanceOperation(instanceId, "ResetInstancesPassword", map[string]string{"Password": password}, true)
+	if len(opts.Password) > 0 {
+		return self.instanceOperation(instanceId, "ResetInstancesPassword", map[string]string{"Password": opts.Password}, true)
 	}
 	return nil
 }
 
 func (self *SInstance) DeleteVM(ctx context.Context) error {
+	diskIds := []string{}
+	for _, disk := range self.DataDisks {
+		if !disk.DeleteWithInstance {
+			diskIds = append(diskIds, disk.DiskId)
+		}
+	}
 	err := self.host.zone.region.DeleteVM(self.InstanceId)
 	if err != nil {
 		return errors.Wrapf(err, "region.DeleteVM(%s)", self.InstanceId)
@@ -827,7 +786,17 @@ func (self *SInstance) DeleteVM(ctx context.Context) error {
 			return errors.Wrapf(err, "region.DeleteVM(%s)", self.InstanceId)
 		}
 	}
-	return cloudprovider.WaitDeleted(self, 10*time.Second, 5*time.Minute) // 5minutes
+	err = cloudprovider.WaitDeleted(self, 10*time.Second, 5*time.Minute) // 5minutes
+	if err != nil {
+		return errors.Wrapf(err, "WaitDeleted")
+	}
+	if len(diskIds) > 0 {
+		err = self.host.zone.region.DeleteDisk(diskIds)
+		if err != nil {
+			return errors.Wrapf(err, "DeleteDisk")
+		}
+	}
+	return nil
 }
 
 func (self *SRegion) UpdateVM(instanceId string, name string) error {
@@ -891,11 +860,11 @@ func (self *SRegion) DetachDisk(instanceId string, diskId string) error {
 func (self *SRegion) AttachDisk(instanceId string, diskId string) error {
 	params := make(map[string]string)
 	params["InstanceId"] = instanceId
+	params["DeleteWithInstance"] = "True"
 	params["DiskIds.0"] = diskId
 	_, err := self.cbsRequest("AttachDisks", params)
 	if err != nil {
-		log.Errorf("AttachDisks %s to %s fail %s", diskId, instanceId, err)
-		return err
+		return errors.Wrapf(err, "AttachDisks %s => %s", diskId, instanceId)
 	}
 	return nil
 }

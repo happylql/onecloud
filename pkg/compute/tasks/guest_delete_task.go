@@ -53,15 +53,20 @@ func (self *GuestDeleteTask) OnInit(ctx context.Context, obj db.IStandaloneModel
 		self.OnGuestStopComplete(ctx, guest, data)
 		return
 	}
+	drv, err := guest.GetDriver()
+	if err != nil {
+		self.OnGuestStopComplete(ctx, guest, data)
+		return
+	}
 	if len(guest.BackupHostId) > 0 {
 		self.SetStage("OnMasterHostStopGuestComplete", nil)
-		if err := guest.GetDriver().RequestStopGuestForDelete(ctx, guest, nil, self); err != nil {
+		if err := drv.RequestStopGuestForDelete(ctx, guest, nil, self); err != nil {
 			log.Errorf("RequestStopGuestForDelete fail %s", err)
 			self.OnMasterHostStopGuestComplete(ctx, guest, nil)
 		}
 	} else {
 		self.SetStage("OnGuestStopComplete", nil)
-		if err := guest.GetDriver().RequestStopGuestForDelete(ctx, guest, nil, self); err != nil {
+		if err := drv.RequestStopGuestForDelete(ctx, guest, nil, self); err != nil {
 			log.Errorf("RequestStopGuestForDelete fail %s", err)
 			self.OnGuestStopComplete(ctx, guest, nil)
 		}
@@ -71,7 +76,12 @@ func (self *GuestDeleteTask) OnInit(ctx context.Context, obj db.IStandaloneModel
 func (self *GuestDeleteTask) OnMasterHostStopGuestComplete(ctx context.Context, guest *models.SGuest, data jsonutils.JSONObject) {
 	self.SetStage("OnGuestStopComplete", nil)
 	host := models.HostManager.FetchHostById(guest.BackupHostId)
-	err := guest.GetDriver().RequestStopGuestForDelete(ctx, guest, host, self)
+	drv, err := guest.GetDriver()
+	if err != nil {
+		self.OnGuestStopComplete(ctx, guest, nil)
+		return
+	}
+	err = drv.RequestStopGuestForDelete(ctx, guest, host, self)
 	if err != nil {
 		log.Errorf("RequestStopGuestForDelete fail %s", err)
 		self.OnGuestStopComplete(ctx, guest, nil)
@@ -115,12 +125,6 @@ func (self *GuestDeleteTask) OnStartEipDissociate(ctx context.Context, guest *mo
 		sourceGuest := models.GuestManager.FetchGuestById(sourceGuestId)
 		if sourceGuest != nil &&
 			sourceGuest.GetMetadata(ctx, api.SERVER_META_CONVERTED_SERVER, self.UserCred) == guest.Id {
-			err := guest.ConvertEsxiNetworks(sourceGuest)
-			if err != nil {
-				log.Errorf("Convert networks failed %s", err)
-				self.OnFailed(ctx, guest, jsonutils.NewString(err.Error()))
-				return
-			}
 			sourceGuest.RemoveMetadata(ctx, api.SERVER_META_CONVERTED_SERVER, self.UserCred)
 			sourceGuest.StartSyncstatus(ctx, self.UserCred, "")
 		}
@@ -169,7 +173,7 @@ func (self *GuestDeleteTask) OnDiskDetachComplete(ctx context.Context, obj db.IS
 	}
 	if len(guestdisks) == 0 {
 		// on guest disks detached
-		self.doClearSecurityGroupComplete(ctx, guest)
+		self.doClearGPUDevicesComplete(ctx, guest)
 		return
 	}
 	// detach last detachable disk
@@ -181,7 +185,7 @@ func (self *GuestDeleteTask) OnDiskDetachComplete(ctx context.Context, obj db.IS
 	log.Debugf("lastDisk IsDetachable?? %v", lastDisk.IsDetachable())
 	if !lastDisk.IsDetachable() {
 		// no more disk need detach
-		self.doClearSecurityGroupComplete(ctx, guest)
+		self.doClearGPUDevicesComplete(ctx, guest)
 		return
 	}
 	purge := jsonutils.QueryBoolean(self.Params, "purge", false)
@@ -193,12 +197,10 @@ func (self *GuestDeleteTask) OnDiskDetachCompleteFailed(ctx context.Context, obj
 	self.OnFailed(ctx, guest, err)
 }
 
-// revoke all secgroups
-func (self *GuestDeleteTask) doClearSecurityGroupComplete(ctx context.Context, guest *models.SGuest) {
-	log.Debugf("doClearSecurityGroupComplete")
+// clean gpu devices
+func (self *GuestDeleteTask) doClearGPUDevicesComplete(ctx context.Context, guest *models.SGuest) {
+	log.Debugf("doClearGPUDevicesComplete")
 	models.IsolatedDeviceManager.ReleaseGPUDevicesOfGuest(ctx, guest, self.UserCred)
-	guest.RevokeAllSecgroups(ctx, self.UserCred)
-	// sync revoked secgroups to remote cloud
 	if jsonutils.QueryBoolean(self.Params, "purge", false) {
 		self.OnSyncConfigComplete(ctx, guest, nil)
 	} else {
@@ -251,7 +253,7 @@ func (self *GuestDeleteTask) OnGuestDeleteFailed(ctx context.Context, obj db.ISt
 
 func (self *GuestDeleteTask) doStartDeleteGuest(ctx context.Context, obj db.IStandaloneModel) {
 	guest := obj.(*models.SGuest)
-	guest.SetStatus(self.UserCred, api.VM_DELETING, "delete server after stop")
+	guest.SetStatus(ctx, self.UserCred, api.VM_DELETING, "delete server after stop")
 	db.OpsLog.LogEvent(guest, db.ACT_DELOCATING, guest.GetShortDesc(ctx), self.UserCred)
 	self.StartDeleteGuest(ctx, guest)
 }
@@ -289,7 +291,12 @@ func (self *GuestDeleteTask) StartDeleteGuest(ctx context.Context, guest *models
 	}
 	// No snapshot
 	self.SetStage("OnGuestDetachDisksComplete", nil)
-	guest.GetDriver().RequestDetachDisksFromGuestForDelete(ctx, guest, self)
+	drv, err := guest.GetDriver()
+	if err != nil {
+		self.OnGuestDeleteFailed(ctx, guest, jsonutils.NewString(err.Error()))
+		return
+	}
+	drv.RequestDetachDisksFromGuestForDelete(ctx, guest, self)
 }
 
 func (self *GuestDeleteTask) OnGuestDetachDisksComplete(ctx context.Context, obj db.IStandaloneModel, data jsonutils.JSONObject) {
@@ -322,7 +329,7 @@ func (self *GuestDeleteTask) DoDeleteGuest(ctx context.Context, guest *models.SG
 }
 
 func (self *GuestDeleteTask) OnFailed(ctx context.Context, guest *models.SGuest, err jsonutils.JSONObject) {
-	guest.SetStatus(self.UserCred, api.VM_DELETE_FAIL, err.String())
+	guest.SetStatus(ctx, self.UserCred, api.VM_DELETE_FAIL, err.String())
 	db.OpsLog.LogEvent(guest, db.ACT_DELOCATE_FAIL, err, self.UserCred)
 	logclient.AddActionLogWithStartable(self, guest, logclient.ACT_DELOCATE, err, self.UserCred, false)
 	notifyclient.EventNotify(ctx, self.GetUserCred(), notifyclient.SEventNotifyParam{
@@ -344,7 +351,10 @@ func (self *GuestDeleteTask) OnGuestDeleteComplete(ctx context.Context, obj db.I
 	guest.EjectAllIso(self.UserCred)
 	guest.EjectAllVfd(self.UserCred)
 	guest.DeleteEip(ctx, self.UserCred)
-	guest.GetDriver().OnDeleteGuestFinalCleanup(ctx, guest, self.UserCred)
+	drv, _ := guest.GetDriver()
+	if drv != nil {
+		drv.OnDeleteGuestFinalCleanup(ctx, guest, self.UserCred)
+	}
 	self.DeleteGuest(ctx, guest)
 }
 

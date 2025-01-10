@@ -24,6 +24,7 @@ import (
 	"yunion.io/x/jsonutils"
 	"yunion.io/x/pkg/errors"
 
+	"yunion.io/x/cloudmux/pkg/apis"
 	api "yunion.io/x/cloudmux/pkg/apis/compute"
 	"yunion.io/x/cloudmux/pkg/cloudprovider"
 	"yunion.io/x/cloudmux/pkg/multicloud"
@@ -109,6 +110,13 @@ func (self *SHost) GetStatus() string {
 	return api.HOST_STATUS_RUNNING
 }
 
+func (self *SHost) GetCpuArchitecture() string {
+	if strings.Contains(self.Kversion, "arm") {
+		return apis.OS_ARCH_AARCH64
+	}
+	return apis.OS_ARCH_X86_64
+}
+
 func (self *SHost) GetAccessIp() string {
 	network := fmt.Sprintf("nodes/%s/network", self.Node)
 	ret := []struct {
@@ -170,8 +178,8 @@ func (self *SHost) GetReservedMemoryMb() int {
 	return 0
 }
 
-func (self *SHost) GetStorageSizeMB() int {
-	return int(self.Rootfs.Total / 1024 / 1024)
+func (self *SHost) GetStorageSizeMB() int64 {
+	return self.Rootfs.Total / 1024 / 1024
 }
 
 func (self *SHost) GetStorageType() string {
