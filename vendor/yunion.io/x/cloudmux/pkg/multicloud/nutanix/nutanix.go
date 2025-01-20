@@ -328,8 +328,13 @@ func (self *SNutanixClient) get(res string, id string, params url.Values, retVal
 	return nil
 }
 
+func (cli *SNutanixClient) GetCloudRegionExternalIdPrefix() string {
+	return fmt.Sprintf("%s/%s", CLOUD_PROVIDER_NUTANIX, cli.cpcfg.Id)
+}
+
 func (self *SNutanixClient) GetSubAccounts() ([]cloudprovider.SSubAccount, error) {
 	subAccount := cloudprovider.SSubAccount{
+		Id:           self.GetAccountId(),
 		Account:      self.username,
 		Name:         self.cpcfg.Name,
 		HealthStatus: api.CLOUD_PROVIDER_HEALTH_NORMAL,
@@ -384,9 +389,9 @@ func _rawRequest(cli *http.Client, method httputils.THttpMethod, url string, hea
 	return httputils.Request(cli, context.Background(), method, url, header, body, debug)
 }
 
-func (self *SNutanixClient) GetIRegions() []cloudprovider.ICloudRegion {
+func (self *SNutanixClient) GetIRegions() ([]cloudprovider.ICloudRegion, error) {
 	region := &SRegion{cli: self}
-	return []cloudprovider.ICloudRegion{region}
+	return []cloudprovider.ICloudRegion{region}, nil
 }
 
 func (self *SNutanixClient) getTask(id string) (*STask, error) {

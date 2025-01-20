@@ -63,18 +63,21 @@ func (self *GuestSaveGuestImageTask) OnInit(ctx context.Context, obj db.IStandal
 }
 
 func (self *GuestSaveGuestImageTask) OnSaveRootImageComplete(ctx context.Context, guest *models.SGuest, data jsonutils.JSONObject) {
-	subTasks := taskman.SubTaskManager.GetTotalSubtasks(self.Id, "on_save_root_image_complete", taskman.SUBTASK_FAIL)
-
-	if len(subTasks) > 0 {
+	subTasksCnt, err := taskman.SubTaskManager.GetSubtasksCount(self.Id, "on_save_root_image_complete", taskman.SUBTASK_FAIL)
+	if err != nil {
+		self.taskFailed(ctx, guest, jsonutils.NewString(err.Error()))
+		return
+	} else if subTasksCnt > 0 {
 		self.taskFailed(ctx, guest, jsonutils.NewString("subtask failed"))
 		// ??? return ???
+		return
 	}
 
 	if restart, _ := self.GetParams().Bool("auto_start"); restart {
 		self.SetStage("OnStartServerComplete", nil)
 		guest.StartGueststartTask(ctx, self.GetUserCred(), nil, self.GetTaskId())
 	} else {
-		guest.SetStatus(self.UserCred, api.VM_READY, "")
+		guest.SetStatus(ctx, self.UserCred, api.VM_READY, "")
 		self.taskSuc(ctx, guest)
 	}
 }
@@ -99,7 +102,7 @@ func (self *GuestSaveGuestImageTask) taskSuc(ctx context.Context, guest *models.
 
 func (self *GuestSaveGuestImageTask) taskFailed(ctx context.Context, guest *models.SGuest, reason jsonutils.JSONObject) {
 
-	guest.SetStatus(self.UserCred, api.VM_SAVE_DISK_FAILED, reason.String())
+	guest.SetStatus(ctx, self.UserCred, api.VM_SAVE_DISK_FAILED, reason.String())
 	db.OpsLog.LogEvent(guest, db.ACT_GUEST_SAVE_GUEST_IMAGE_FAIL, reason, self.UserCred)
 	logclient.AddActionLogWithStartable(self, guest, logclient.ACT_IMAGE_SAVE, reason, self.UserCred, false)
 

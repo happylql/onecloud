@@ -60,7 +60,9 @@ func (b *BasePredicate) PreExecute(ctx context.Context, unit *core.Unit, candis 
 }
 
 func (b *BasePredicate) GetHypervisorDriver(u *core.Unit) models.IGuestDriver {
-	return models.GetDriver(u.GetHypervisor())
+	hypervisor := u.GetHypervisor()
+	driver, _ := models.GetDriver(hypervisor, u.SchedInfo.Provider)
+	return driver
 }
 
 type PredicateHelper struct {
@@ -280,6 +282,7 @@ type BaseSchedtagPredicate struct {
 	CandidateInputResources *CandidateInputResourcesMap
 
 	Hypervisor string
+	Provider   string
 }
 
 func NewBaseSchedtagPredicate() *BaseSchedtagPredicate {
@@ -344,7 +347,12 @@ func (w SchedtagResourceW) GetDynamicSchedDesc() *jsonutils.JSONDict {
 }
 
 func (p *BaseSchedtagPredicate) GetHypervisorDriver() models.IGuestDriver {
-	return models.GetDriver(p.Hypervisor)
+	hypervisor := p.Hypervisor
+	if hypervisor == api.HostHypervisorForKvm {
+		hypervisor = api.SchedTypeKvm
+	}
+	driver, _ := models.GetDriver(hypervisor, p.Provider)
+	return driver
 }
 
 func (p *BaseSchedtagPredicate) check(input ISchedtagCustomer, candidate ISchedtagCandidateResource, u *core.Unit, c core.Candidater) (*PredicatedSchedtagResource, error) {
@@ -409,7 +417,12 @@ func (p *BaseSchedtagPredicate) PreExecute(ctx context.Context, sp ISchedtagPred
 		return false, nil
 	}
 
+	if u.SchedData().ResetCpuNumaPin {
+		return false, nil
+	}
+
 	p.Hypervisor = u.GetHypervisor()
+	p.Provider = u.SchedInfo.Provider
 
 	// always do select step
 	u.AppendSelectPlugin(sp)

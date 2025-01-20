@@ -45,7 +45,7 @@ func (self *GuestDeployTask) OnInit(ctx context.Context, obj db.IStandaloneModel
 func (self *GuestDeployTask) OnGuestNetworkReady(ctx context.Context, guest *models.SGuest) {
 	self.SetStage("OnDeployWaitServerStop", nil)
 	if jsonutils.QueryBoolean(self.Params, "restart", false) {
-		guest.StartGuestStopTask(ctx, self.UserCred, false, false, self.GetTaskId())
+		guest.StartGuestStopTask(ctx, self.UserCred, 60, false, false, self.GetTaskId())
 	} else {
 		// Note: have to use LocalTaskRun, run to another place implement OnDeployWaitServerStop
 		taskman.LocalTaskRun(self, func() (jsonutils.JSONObject, error) {
@@ -65,17 +65,22 @@ func (self *GuestDeployTask) OnDeployWaitServerStop(ctx context.Context, guest *
 }
 
 func (self *GuestDeployTask) DeployOnHost(ctx context.Context, guest *models.SGuest, host *models.SHost) {
-	err := guest.GetDriver().RequestDeployGuestOnHost(ctx, guest, host, self)
+	drv, err := guest.GetDriver()
+	if err != nil {
+		self.OnDeployGuestFail(ctx, guest, err)
+		return
+	}
+	err = drv.RequestDeployGuestOnHost(ctx, guest, host, self)
 	if err != nil {
 		log.Errorf("request_deploy_guest_on_host %s", err)
 		self.OnDeployGuestFail(ctx, guest, err)
 	} else {
-		guest.SetStatus(self.UserCred, api.VM_DEPLOYING, "")
+		guest.SetStatus(ctx, self.UserCred, api.VM_DEPLOYING, "")
 	}
 }
 
 func (self *GuestDeployTask) OnDeployGuestFail(ctx context.Context, guest *models.SGuest, err error) {
-	guest.SetStatus(self.UserCred, api.VM_DEPLOY_FAILED, err.Error())
+	guest.SetStatus(ctx, self.UserCred, api.VM_DEPLOY_FAILED, err.Error())
 	self.SetStageFailed(ctx, jsonutils.NewString(err.Error()))
 	logclient.AddActionLogWithStartable(self, guest, logclient.ACT_VM_DEPLOY, err, self.UserCred, false)
 	db.OpsLog.LogEvent(guest, db.ACT_VM_DEPLOY_FAIL, err.Error(), self.UserCred)
@@ -84,7 +89,12 @@ func (self *GuestDeployTask) OnDeployGuestFail(ctx context.Context, guest *model
 func (self *GuestDeployTask) OnDeployGuestComplete(ctx context.Context, obj db.IStandaloneModel, data jsonutils.JSONObject) {
 	log.Infof("on_guest_deploy_task_data_received %s", data)
 	guest := obj.(*models.SGuest)
-	guest.GetDriver().OnGuestDeployTaskDataReceived(ctx, guest, self, data)
+	drv, err := guest.GetDriver()
+	if err != nil {
+		self.OnDeployGuestCompleteFailed(ctx, guest, jsonutils.NewString(err.Error()))
+		return
+	}
+	drv.OnGuestDeployTaskDataReceived(ctx, guest, self, data)
 	action, _ := self.Params.GetString("deploy_action")
 	keypair, _ := self.Params.GetString("keypair")
 	reset_password := jsonutils.QueryBoolean(self.Params, "reset_password", false)
@@ -138,7 +148,7 @@ func (self *GuestDeployTask) OnDeployGuestCompleteFailed(ctx context.Context, ob
 			log.Errorf("unset guest %s keypair failed %v", guest.Name, err)
 		}
 	}
-	guest.SetStatus(self.UserCred, api.VM_DEPLOY_FAILED, data.String())
+	guest.SetStatus(ctx, self.UserCred, api.VM_DEPLOY_FAILED, data.String())
 	self.SetStageFailed(ctx, data)
 	logclient.AddActionLogWithStartable(self, guest, logclient.ACT_VM_DEPLOY, data, self.UserCred, false)
 	db.OpsLog.LogEvent(guest, db.ACT_VM_DEPLOY_FAIL, data, self.UserCred)

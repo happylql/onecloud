@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"os"
 	"path"
 	"sync"
@@ -28,14 +29,17 @@ import (
 	"yunion.io/x/jsonutils"
 	"yunion.io/x/log"
 	"yunion.io/x/pkg/errors"
+	"yunion.io/x/pkg/util/httputils"
 
 	"yunion.io/x/onecloud/pkg/apis"
 	api "yunion.io/x/onecloud/pkg/apis/compute"
+	imageapi "yunion.io/x/onecloud/pkg/apis/image"
 	"yunion.io/x/onecloud/pkg/hostman/hostutils"
 	"yunion.io/x/onecloud/pkg/hostman/storageman/remotefile"
 	"yunion.io/x/onecloud/pkg/mcclient/auth"
 	modules "yunion.io/x/onecloud/pkg/mcclient/modules/compute"
 	"yunion.io/x/onecloud/pkg/util/fileutils2"
+	"yunion.io/x/onecloud/pkg/util/procutils"
 	"yunion.io/x/onecloud/pkg/util/qemuimg"
 )
 
@@ -56,7 +60,8 @@ type SLocalImageCache struct {
 	cond          *sync.Cond
 	lastCheckTime time.Time
 
-	remoteFile *remotefile.SRemoteFile
+	remoteFile    *remotefile.SRemoteFile
+	accessDirLock sync.Mutex
 }
 
 func NewLocalImageCache(imageId string, imagecacheManager IImageCacheManger) *SLocalImageCache {
@@ -64,6 +69,7 @@ func NewLocalImageCache(imageId string, imagecacheManager IImageCacheManger) *SL
 	imageCache.imageId = imageId
 	imageCache.Manager = imagecacheManager
 	imageCache.cond = sync.NewCond(new(sync.Mutex))
+	imageCache.accessDirLock = sync.Mutex{}
 	return imageCache
 }
 
@@ -89,7 +95,25 @@ func (l *SLocalImageCache) Load() error {
 		desc    = &remotefile.SImageDesc{}
 	)
 	if fileutils2.Exists(imgPath) {
-		if !fileutils2.Exists(infPath) {
+		needReload := false
+		if fileutils2.Exists(infPath) {
+			sdesc, err := fileutils2.FileGetContents(infPath)
+			if err != nil {
+				return errors.Wrapf(err, "fileutils2.FileGetContents(%s)", infPath)
+			}
+			err = json.Unmarshal([]byte(sdesc), desc)
+			if err != nil {
+				return errors.Wrapf(err, "jsonutils.Unmarshal(%s)", infPath)
+			}
+			fi := l.getFileInfo()
+			if fi != nil && fi.Size()/1024/1024 != desc.SizeMb {
+				// fix file size
+				needReload = true
+			}
+		} else {
+			needReload = true
+		}
+		if needReload {
 			img, err := qemuimg.NewQemuImage(imgPath)
 			if err != nil {
 				return errors.Wrapf(err, "NewQemuImage(%s)", imgPath)
@@ -101,25 +125,26 @@ func (l *SLocalImageCache) Load() error {
 			if err != nil {
 				return errors.Wrapf(err, "fileutils2.MD5(%s)", imgPath)
 			}
+
 			desc = &remotefile.SImageDesc{
 				Format: string(img.Format),
 				Id:     l.imageId,
 				Chksum: chksum,
 				Path:   imgPath,
-				Size:   l.GetSize(),
 			}
+
+			fi := l.getFileInfo()
+			if fi != nil {
+				desc.SizeMb = fi.Size() / 1024 / 1024
+				if fi.Sys() != nil {
+					atime := fi.Sys().(*syscall.Stat_t).Atim
+					desc.AccessAt = time.Unix(atime.Sec, atime.Nsec)
+				}
+			}
+
 			err = fileutils2.FilePutContents(infPath, jsonutils.Marshal(desc).PrettyString(), false)
 			if err != nil {
 				return errors.Wrapf(err, "fileutils2.FilePutContents(%s)", infPath)
-			}
-		} else {
-			sdesc, err := fileutils2.FileGetContents(infPath)
-			if err != nil {
-				return errors.Wrapf(err, "fileutils2.FileGetContents(%s)", infPath)
-			}
-			err = json.Unmarshal([]byte(sdesc), desc)
-			if err != nil {
-				return errors.Wrapf(err, "jsonutils.Unmarshal(%s)", infPath)
 			}
 		}
 		if len(desc.Chksum) > 0 && len(desc.Id) > 0 && desc.Id == l.imageId {
@@ -211,8 +236,10 @@ func (l *SLocalImageCache) fetch(ctx context.Context, input api.CacheImageInput,
 		if err != nil {
 			return errors.Wrapf(err, "remoteFile.GetInfo")
 		}
-
-		l.Size = l.GetSize() / 1024 / 1024
+		fi := l.getFileInfo()
+		if fi != nil {
+			l.Size = fi.Size() / 1024 / 1024
+		}
 		l.Desc.Id = l.imageId
 		l.lastCheckTime = time.Now()
 		l.consumerCount++
@@ -228,8 +255,19 @@ func (l *SLocalImageCache) fetch(ctx context.Context, input api.CacheImageInput,
 		}
 		return nil
 	}
-	if fileutils2.Exists(l.GetPath()) && l.remoteFile.VerifyIntegrity(callback) == nil {
-		return _fetch()
+	if fileutils2.Exists(l.GetPath()) {
+		if input.SkipChecksumIfExists {
+			if err := l.remoteFile.FillAttributes(callback); err != nil {
+				return errors.Wrap(err, "fetch remote attribute")
+			}
+			return _fetch()
+		} else {
+			if err := l.remoteFile.VerifyIntegrity(callback); err == nil {
+				return _fetch()
+			} else {
+				log.Warningf("Verify remotefile checksum error: %v, starting fetching it", err)
+			}
+		}
 	}
 	err := l.remoteFile.Fetch(callback)
 	if err != nil {
@@ -241,25 +279,25 @@ func (l *SLocalImageCache) fetch(ctx context.Context, input api.CacheImageInput,
 func (l *SLocalImageCache) Remove(ctx context.Context) error {
 	if fileutils2.Exists(l.GetPath()) {
 		if err := syscall.Unlink(l.GetPath()); err != nil {
-			return err
+			return errors.Wrap(err, l.GetPath())
 		}
 	}
 	if fileutils2.Exists(l.GetInfPath()) {
 		if err := syscall.Unlink(l.GetInfPath()); err != nil {
-			return err
+			return errors.Wrap(err, l.GetInfPath())
 		}
 	}
 	if fileutils2.Exists(l.GetTmpPath()) {
 		if err := syscall.Unlink(l.GetTmpPath()); err != nil {
-			return err
+			return errors.Wrap(err, l.GetTmpPath())
 		}
 	}
 
 	go func() {
 		_, err := modules.Storagecachedimages.Detach(hostutils.GetComputeSession(ctx),
 			l.Manager.GetId(), l.imageId, nil)
-		if err != nil {
-			log.Errorf("Fail to delete host cached image: %s", err)
+		if err != nil && httputils.ErrorCode(err) != 404 {
+			log.Errorf("Fail to delete host cached image %s at %s: %s", l.imageId, l.Manager.GetId(), err)
 		}
 	}()
 
@@ -278,11 +316,44 @@ func (l *SLocalImageCache) GetInfPath() string {
 	return l.GetPath() + _INF_SUFFIX_
 }
 
-func (l *SLocalImageCache) GetSize() int64 {
+func (l *SLocalImageCache) getFileInfo() fs.FileInfo {
 	if fi, err := os.Stat(l.GetPath()); err != nil {
 		log.Errorln(err)
-		return 0
+		return nil
 	} else {
-		return fi.Size()
+		return fi
 	}
+}
+
+func (l *SLocalImageCache) getAccessDirPath() string {
+	return fmt.Sprintf("%s-dir", l.GetPath())
+}
+
+func (l *SLocalImageCache) GetAccessDirectory() (string, error) {
+	if l.Desc.Format != imageapi.IMAGE_DISK_FORMAT_TGZ {
+		return "", errors.Wrapf(errors.ErrNotSupported, "format %s", l.Desc.Format)
+	}
+
+	l.accessDirLock.Lock()
+	defer l.accessDirLock.Unlock()
+	dir := l.getAccessDirPath()
+	if fileutils2.Exists(dir) {
+		return dir, nil
+	}
+	tmpDir := fmt.Sprintf("%s-tmp", dir)
+	// untar cached image
+	out, err := procutils.NewRemoteCommandAsFarAsPossible("mkdir", "-p", tmpDir).Output()
+	if err != nil {
+		return "", errors.Wrapf(err, "mkdir %s: %s", tmpDir, out)
+	}
+	out, err = procutils.NewRemoteCommandAsFarAsPossible("tar", "xf", l.GetPath(), "-C", tmpDir).Output()
+	if err != nil {
+		return "", errors.Wrapf(err, "untar to %s: %s", tmpDir, out)
+	}
+	out, err = procutils.NewRemoteCommandAsFarAsPossible("mv", tmpDir, dir).Output()
+	if err != nil {
+		return "", errors.Wrapf(err, "mv %s %s: %s", tmpDir, dir, out)
+	}
+
+	return dir, nil
 }

@@ -78,12 +78,15 @@ type NetworkConfig struct {
 
 	// 子网内的IPv6地址
 	// required: false
-	// swagger:ignore
 	Address6 string `json:"address6"`
 
 	// 如果是批量创建，指定每台主机子网内的IPv4地址
 	// required: false
 	Addresses6 []string `json:"addresses6"`
+
+	// 是否要求分配IPv6地址
+	// required: false
+	RequireIPv6 bool `json:"require_ipv6"`
 
 	// 驱动方式
 	// 若指定镜像的网络驱动方式，此参数会被覆盖
@@ -91,10 +94,13 @@ type NetworkConfig struct {
 	BwLimit        int    `json:"bw_limit"`
 	Vip            bool   `json:"vip"`
 	Reserved       bool   `json:"reserved"`
-	NetType        string `json:"net_type"`
 	NumQueues      int    `json:"num_queues"`
 	RxTrafficLimit int64  `json:"rx_traffic_limit"`
 	TxTrafficLimit int64  `json:"tx_traffic_limit"`
+
+	NetType TNetworkType `json:"net_type"`
+
+	IsDefault bool `json:"is_default"`
 
 	// sriov nic
 	SriovDevice *IsolatedDeviceConfig `json:"sriov_device"`
@@ -107,6 +113,8 @@ type NetworkConfig struct {
 	StandbyPortCount int `json:"standby_port_count"`
 	StandbyAddrCount int `json:"standby_addr_count"`
 
+	PortMappings GuestPortMappings `json:"port_mappings"`
+
 	// swagger:ignore
 	Project string `json:"project_id"`
 
@@ -118,8 +126,15 @@ type NetworkConfig struct {
 
 type AttachNetworkInput struct {
 	// 添加的网卡的配置
-	// required: true
+	// required: false
 	Nets []*NetworkConfig `json:"nets"`
+
+	// 添加的网卡的配置
+	// required: false
+	NetDesc []string `json:"net_desc"`
+
+	// 添加后不立即同步配置
+	DisableSyncConfig *bool `json:"disable_sync_config"`
 }
 
 type DiskConfig struct {
@@ -145,7 +160,7 @@ type DiskConfig struct {
 	BackupId string `json:"backup_id"`
 
 	// 磁盘类型
-	// enum: sys, data, swap
+	// enum: ["sys", "data", "swap"]
 	DiskType string `json:"disk_type"`
 
 	Schedtags []*SchedtagConfig `json:"schedtags"`
@@ -156,22 +171,25 @@ type DiskConfig struct {
 	SizeMb int `json:"size"`
 
 	// 文件系统,仅kvm支持自动格式化磁盘,私有云和公有云此参数不会生效
-	// enum: swap, ext2, ext3, ext4, xfs, ntfs, fat, hfsplus
+	// enum: ["swap", "ext2", "ext3", "ext4", "xfs", "ntfs", "fat", "hfsplus"]
 	// requried: false
 	Fs string `json:"fs"`
 
+	// 文件系统特性
+	FsFeatures *DiskFsFeatures `json:"fs_features"`
+
 	// 磁盘存储格式
-	// enum: qcow2, raw, docker, iso, vmdk, vmdkflatver1, vmdkflatver2, vmdkflat, vmdksparse, vmdksparsever1, vmdksparsever2, vmdksepsparse vhd
+	// enum: ["qcow2", "raw", "docker", "iso", "vmdk", "vmdkflatver1", "vmdkflatver2", "vmdkflat", "vmdksparse", "vmdksparsever1", "vmdksparsever2", "vmdksepsparse", "vhd"]
 	// requried: false
 	Format string `json:"format"`
 
 	// 磁盘驱动方式
-	// enum: virtio, ide, scsi, sata, pvscsi
+	// enum: ["virtio", "ide", "scsi", "sata", "pvscsi"]
 	// requried: false
 	Driver string `json:"driver"`
 
 	// 磁盘缓存模式
-	// enum: writeback, none, writethrough
+	// enum: ["writeback", "none", "writethrough"]
 	// requried: false
 	Cache string `json:"cache"`
 
@@ -272,9 +290,10 @@ type IsolatedDeviceConfig struct {
 	DevType      string `json:"dev_type"`
 	Model        string `json:"model"`
 	Vendor       string `json:"vendor"`
-	NetworkIndex *int8  `json:"network_index"`
+	NetworkIndex *int   `json:"network_index"`
 	WireId       string `json:"wire_id"`
 	DiskIndex    *int8  `json:"disk_index"`
+	DevicePath   string `json:"device_path"`
 }
 
 type BaremetalDiskConfig struct {
@@ -294,6 +313,21 @@ type BaremetalDiskConfig struct {
 	RA           *bool   `json:"ra,omitempty"`
 	WT           *bool   `json:"wt,omitempty"`
 	Direct       *bool   `json:"direct,omitempty"`
+}
+
+type RootDiskMatcherSizeMBRange struct {
+	Start int64 `json:"start"`
+	End   int64 `json:"end"`
+}
+
+const (
+	BAREMETAL_SERVER_METATA_ROOT_DISK_MATCHER = "baremetal_root_disk_matcher"
+)
+
+type BaremetalRootDiskMatcher struct {
+	Device      string                      `json:"device"`
+	SizeMB      int64                       `json:"size_mb"`
+	SizeMBRange *RootDiskMatcherSizeMBRange `json:"size_mb_range"`
 }
 
 type ServerConfigs struct {
@@ -337,6 +371,9 @@ type ServerConfigs struct {
 	// default: kvm
 	Hypervisor string `json:"hypervisor"`
 
+	// swagger: ignore
+	Provider string `json:"provider"`
+
 	// 包年包月资源池
 	// swagger:ignore
 	// emum: shared, prepaid, dedicated
@@ -359,7 +396,7 @@ type ServerConfigs struct {
 	Backup bool `json:"backup"`
 
 	// 设置为 daemon 虚机
-	// default: nil
+	// default: false
 	// required: false
 	IsDaemon *bool `json:"is_daemon"`
 
@@ -387,6 +424,9 @@ type ServerConfigs struct {
 
 	// 裸金属磁盘配置列表
 	BaremetalDiskConfigs []*BaremetalDiskConfig `json:"baremetal_disk_configs"`
+
+	// 裸金属系统盘匹配器
+	BaremetalRootDiskMatcher *BaremetalRootDiskMatcher `json:"baremetal_root_disk_matcher"`
 
 	// 主机组列表, 参数可以是主机组名称或ID,建议使用ID
 	InstanceGroupIds []string `json:"groups"`
@@ -434,6 +474,10 @@ type ServerCreateInput struct {
 	// default: 1
 	CpuSockets int `json:"cpu_sockets"`
 
+	// 额外分配 cpu 数量
+	// required: false
+	ExtraCpuCount int `json:"extra_cpu_count"`
+
 	// 用户自定义启动脚本
 	// 支持 #cloud-config yaml 格式及shell脚本
 	// 支持特殊user data平台: Aliyun, Qcloud, Azure, Apsara, Ucloud
@@ -466,12 +510,12 @@ type ServerCreateInput struct {
 	Cdrom          string `json:"cdrom"`
 	CdromBootIndex *int8  `json:"cdrom_boot_index"`
 
-	// enum: cirros, vmware, qxl, std
+	// enum: ["cirros", "vmware", "qxl", "std"]
 	// default: std
 	Vga string `json:"vga"`
 
 	// 远程连接协议
-	// enum: vnc, spice
+	// enum: ["vnc", "spice"]
 	// default: vnc
 	Vdi string `json:"vdi"`
 
@@ -501,7 +545,7 @@ type ServerCreateInput struct {
 
 	// 关机后执行的操作
 	// terminate: 关机后自动删除
-	// emum: stop, terminate
+	// enum: ["stop", "terminate", "stop_release_gpu"]
 	// default: stop
 	ShutdownBehavior string `json:"shutdown_behavior"`
 
@@ -615,6 +659,8 @@ type ServerCreateInput struct {
 
 	// 指定用于新建主机的主机镜像ID
 	GuestImageID string `json:"guest_image_id"`
+
+	Pod *PodCreateInput `json:"pod"`
 }
 
 func (input *ServerCreateInput) AfterUnmarshal() {

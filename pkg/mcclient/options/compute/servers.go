@@ -15,13 +15,13 @@
 package compute
 
 import (
-	"errors"
 	"fmt"
 	"io/ioutil"
 	"strconv"
 	"strings"
 
 	"yunion.io/x/jsonutils"
+	"yunion.io/x/pkg/errors"
 	"yunion.io/x/pkg/util/fileutils"
 	"yunion.io/x/pkg/util/regutils"
 
@@ -32,7 +32,7 @@ import (
 	"yunion.io/x/onecloud/pkg/util/cgrouputils"
 )
 
-var ErrEmtptyUpdate = errors.New("No valid update data")
+var ErrEmtptyUpdate = errors.Error("No valid update data")
 
 type ServerListOptions struct {
 	Zone               string   `help:"Zone ID or Name"`
@@ -44,7 +44,7 @@ type ServerListOptions struct {
 	Gpu                *bool    `help:"Show gpu servers"`
 	Secgroup           string   `help:"Secgroup ID or Name"`
 	AdminSecgroup      string   `help:"AdminSecgroup ID or Name"`
-	Hypervisor         string   `help:"Show server of hypervisor" choices:"kvm|esxi|container|baremetal|aliyun|azure|aws|huawei|ucloud|volcengine|zstack|openstack|google|ctyun|incloudsphere|nutanix|bingocloud|cloudpods|ecloud|jdcloud|remotefile|h3c|hcs|hcso|hcsop|proxmox|ksyun|baidu|cucloud|qingcloud"`
+	Hypervisor         string   `help:"Show server of hypervisor" choices:"kvm|esxi|pod|baremetal|aliyun|azure|aws|huawei|ucloud|volcengine|zstack|openstack|google|ctyun|incloudsphere|nutanix|bingocloud|cloudpods|ecloud|jdcloud|remotefile|h3c|hcs|hcso|hcsop|proxmox|ksyun|baidu|cucloud|qingcloud|sangfor|zettakit|uis"`
 	Region             string   `help:"Show servers in cloudregion"`
 	WithEip            *bool    `help:"Show Servers with EIP"`
 	WithoutEip         *bool    `help:"Show Servers without EIP"`
@@ -53,7 +53,6 @@ type ServerListOptions struct {
 	UsableServerForEip string   `help:"Eip id or name"`
 	WithoutUserMeta    *bool    `help:"Show Servers without user metadata"`
 	EipAssociable      *bool    `help:"Show Servers can associate with eip"`
-	Group              string   `help:"Instance Group ID or Name"`
 	HostSn             string   `help:"Host SN"`
 	IpAddr             string   `help:"Fileter by ip"`
 	IpAddrs            []string `help:"Fileter by ips"`
@@ -242,25 +241,27 @@ func ParseServerDeployInfoList(list []string) ([]*computeapi.DeployConfig, error
 	return ret, nil
 }
 
-type ServerConfigs struct {
-	Manager    string `help:"Preferred cloudprovider where virtual server should bd created" json:"prefer_manager"`
-	Region     string `help:"Preferred region where virtual server should be created" json:"prefer_region"`
-	Zone       string `help:"Preferred zone where virtual server should be created" json:"prefer_zone"`
-	Wire       string `help:"Preferred wire where virtual server should be created" json:"prefer_wire"`
-	Host       string `help:"Preferred host where virtual server should be created" json:"prefer_host"`
-	BackupHost string `help:"Perfered host where virtual backup server should be created"`
+type ServerCreateCommonConfig struct {
+	Manager string `help:"Preferred cloudprovider where virtual server should bd created" json:"prefer_manager"`
+	Region  string `help:"Preferred region where virtual server should be created" json:"prefer_region"`
+	Zone    string `help:"Preferred zone where virtual server should be created" json:"prefer_zone"`
+	Wire    string `help:"Preferred wire where virtual server should be created" json:"prefer_wire"`
+	Host    string `help:"Preferred host where virtual server should be created" json:"prefer_host"`
 
-	Hypervisor                   string `help:"Hypervisor type" choices:"kvm|esxi|baremetal|container|aliyun|azure|qcloud|aws|huawei|openstack|ucloud|volcengine|zstack|google|ctyun|incloudsphere|bingocloud|cloudpods|ecloud|jdcloud|remotefile|h3c|hcs|hcso|hcsop|proxmox"`
-	ResourceType                 string `help:"Resource type" choices:"shared|prepaid|dedicated"`
-	Backup                       bool   `help:"Create server with backup server"`
-	AutoSwitchToBackupOnHostDown bool   `help:"Auto switch to backup server on host down"`
-	Daemon                       *bool  `help:"Set as a daemon server" json:"is_daemon"`
-
-	Schedtag []string `help:"Schedule policy, key = aggregate name, value = require|exclude|prefer|avoid" metavar:"<KEY:VALUE>"`
-	Disk     []string `help:"
+	ResourceType   string   `help:"Resource type" choices:"shared|prepaid|dedicated"`
+	Schedtag       []string `help:"Schedule policy, key = aggregate name, value = require|exclude|prefer|avoid" metavar:"<KEY:VALUE>"`
+	Net            []string `help:"Network descriptions" metavar:"NETWORK"`
+	NetPortMapping []string `help:"Network port mapping, e.g. 'index=0,port=80,host_port=8080,protocol=<tcp|udp>,host_port_range=<int>-<int>,remote_ips=x.x.x.x|y.y.y.y'" short-token:"p"`
+	NetSchedtag    []string `help:"Network schedtag description, e.g. '0:<tag>:<strategy>'"`
+	IsolatedDevice []string `help:"Isolated device model or ID" metavar:"ISOLATED_DEVICE"`
+	Project        string   `help:"'Owner project ID or Name" json:"tenant"`
+	User           string   `help:"Owner user ID or Name"`
+	Count          int      `help:"Create multiple simultaneously" default:"1"`
+	Disk           []string `help:"
 	Disk descriptions
 	size: 500M, 10G
 	fs: swap, ext2, ext3, ext4, xfs, ntfs, fat, hfsplus
+	fs_features: casefold
 	format: qcow2, raw, docker, iso, vmdk, vmdkflatver1, vmdkflatver2, vmdkflat, vmdksparse, vmdksparsever1, vmdksparsever2, vmdksesparse, vhd
 	driver: virtio, ide, scsi, sata, pvscsi
 	cache_mod: writeback, none, writethrough
@@ -277,47 +278,20 @@ type ServerConfigs struct {
 		--disk 'size=500M'
 		--disk 'snpahost_id=1ceb8c6d-6571-451d-8957-4bd3a871af85'
 	" nargs:"+"`
-	DiskSchedtag   []string `help:"Disk schedtag description, e.g. '0:<tag>:<strategy>'"`
-	Net            []string `help:"Network descriptions" metavar:"NETWORK"`
-	NetSchedtag    []string `help:"Network schedtag description, e.g. '0:<tag>:<strategy>'"`
-	IsolatedDevice []string `help:"Isolated device model or ID" metavar:"ISOLATED_DEVICE"`
-	RaidConfig     []string `help:"Baremetal raid config" json:"-"`
-	Project        string   `help:"'Owner project ID or Name" json:"tenant"`
-	User           string   `help:"Owner user ID or Name"`
-	Count          int      `help:"Create multiple simultaneously" default:"1"`
+	DiskSchedtag []string `help:"Disk schedtag description, e.g. '0:<tag>:<strategy>'"`
 }
 
-func (o ServerConfigs) Data() (*computeapi.ServerConfigs, error) {
+func (o ServerCreateCommonConfig) Data() (*computeapi.ServerConfigs, error) {
 	data := &computeapi.ServerConfigs{
-		PreferManager:    o.Manager,
-		PreferRegion:     o.Region,
-		PreferZone:       o.Zone,
-		PreferWire:       o.Wire,
-		PreferHost:       o.Host,
-		PreferBackupHost: o.BackupHost,
-		Hypervisor:       o.Hypervisor,
-		ResourceType:     o.ResourceType,
-		Backup:           o.Backup,
-		Count:            o.Count,
-		IsDaemon:         o.Daemon,
-	}
-	for i, d := range o.Disk {
-		disk, err := cmdline.ParseDiskConfig(d, i)
-		if err != nil {
-			return nil, err
-		}
-		data.Disks = append(data.Disks, disk)
-	}
-	for _, dtag := range o.DiskSchedtag {
-		idx, tag, err := cmdline.ParseResourceSchedtagConfig(dtag)
-		if err != nil {
-			return nil, fmt.Errorf("ParseDiskSchedtag: %v", err)
-		}
-		if idx >= len(data.Disks) {
-			return nil, fmt.Errorf("Invalid disk index: %d", idx)
-		}
-		d := data.Disks[idx]
-		d.Schedtags = append(d.Schedtags, tag)
+		PreferManager: o.Manager,
+		PreferRegion:  o.Region,
+		PreferZone:    o.Zone,
+		PreferWire:    o.Wire,
+		PreferHost:    o.Host,
+		ResourceType:  o.ResourceType,
+		Count:         o.Count,
+		Networks:      make([]*computeapi.NetworkConfig, 0),
+		Disks:         make([]*computeapi.DiskConfig, 0),
 	}
 	for i, n := range o.Net {
 		net, err := cmdline.ParseNetworkConfig(n, i)
@@ -325,6 +299,19 @@ func (o ServerConfigs) Data() (*computeapi.ServerConfigs, error) {
 			return nil, err
 		}
 		data.Networks = append(data.Networks, net)
+	}
+	if len(o.NetPortMapping) != 0 {
+		pms, err := cmdline.ParseNetworkConfigPortMappings(o.NetPortMapping)
+		if err != nil {
+			return nil, errors.Wrap(err, "parse network port mapping")
+		}
+		for idx, _ := range pms {
+			if idx >= len(data.Networks) {
+				return nil, errors.Errorf("not found %d network of index", idx)
+			}
+			pm := pms[idx]
+			data.Networks[idx].PortMappings = pm
+		}
 	}
 	for _, ntag := range o.NetSchedtag {
 		idx, tag, err := cmdline.ParseResourceSchedtagConfig(ntag)
@@ -344,6 +331,55 @@ func (o ServerConfigs) Data() (*computeapi.ServerConfigs, error) {
 		}
 		data.IsolatedDevices = append(data.IsolatedDevices, dev)
 	}
+	for _, tag := range o.Schedtag {
+		schedtag, err := cmdline.ParseSchedtagConfig(tag)
+		if err != nil {
+			return nil, err
+		}
+		data.Schedtags = append(data.Schedtags, schedtag)
+	}
+	for i, d := range o.Disk {
+		disk, err := cmdline.ParseDiskConfig(d, i)
+		if err != nil {
+			return nil, err
+		}
+		data.Disks = append(data.Disks, disk)
+	}
+	for _, dtag := range o.DiskSchedtag {
+		idx, tag, err := cmdline.ParseResourceSchedtagConfig(dtag)
+		if err != nil {
+			return nil, fmt.Errorf("ParseDiskSchedtag: %v", err)
+		}
+		if idx >= len(data.Disks) {
+			return nil, fmt.Errorf("Invalid disk index: %d", idx)
+		}
+		d := data.Disks[idx]
+		d.Schedtags = append(d.Schedtags, tag)
+	}
+	return data, nil
+}
+
+type ServerConfigs struct {
+	ServerCreateCommonConfig
+	Hypervisor                   string `help:"Hypervisor type" choices:"kvm|pod|esxi|baremetal|container|aliyun|azure|qcloud|aws|huawei|openstack|ucloud|volcengine|zstack|google|ctyun|incloudsphere|bingocloud|cloudpods|ecloud|jdcloud|remotefile|h3c|hcs|hcso|hcsop|proxmox|sangfor|zettakit|uis"`
+	Backup                       bool   `help:"Create server with backup server"`
+	BackupHost                   string `help:"Perfered host where virtual backup server should be created"`
+	AutoSwitchToBackupOnHostDown bool   `help:"Auto switch to backup server on host down"`
+	Daemon                       *bool  `help:"Set as a daemon server" json:"is_daemon"`
+
+	RaidConfig      []string `help:"Baremetal raid config" json:"-"`
+	RootDiskMatcher string   `help:"Baremetal root disk matcher, e.g. 'device=/dev/sdb' 'size=900G' 'size_start=800G,size_end=900G'" json:"-"`
+}
+
+func (o ServerConfigs) Data() (*computeapi.ServerConfigs, error) {
+	data, err := o.ServerCreateCommonConfig.Data()
+	if err != nil {
+		return nil, err
+	}
+	data.Backup = o.Backup
+	data.PreferBackupHost = o.BackupHost
+	data.IsDaemon = o.Daemon
+	data.Hypervisor = o.Hypervisor
 	if len(o.RaidConfig) > 0 {
 		// if data.Hypervisor != "baremetal" {
 		// 	return nil, fmt.Errorf("RaidConfig is applicable to baremetal ONLY")
@@ -356,12 +392,12 @@ func (o ServerConfigs) Data() (*computeapi.ServerConfigs, error) {
 			data.BaremetalDiskConfigs = append(data.BaremetalDiskConfigs, raidConf)
 		}
 	}
-	for _, tag := range o.Schedtag {
-		schedtag, err := cmdline.ParseSchedtagConfig(tag)
+	if len(o.RootDiskMatcher) > 0 {
+		matcher, err := cmdline.ParseBaremetalRootDiskMatcher(o.RootDiskMatcher)
 		if err != nil {
 			return nil, err
 		}
-		data.Schedtags = append(data.Schedtags, schedtag)
+		data.BaremetalRootDiskMatcher = matcher
 	}
 	return data, nil
 }
@@ -418,6 +454,7 @@ type ServerCreateOptionalOptions struct {
 	Iso              string   `help:"ISO image ID" metavar:"IMAGE_ID" json:"cdrom"`
 	IsoBootIndex     *int8    `help:"Iso bootindex" metavar:"IMAGE_BOOT_INDEX" json:"cdrom_boot_index"`
 	VcpuCount        int      `help:"#CPU cores of VM server, default 1" default:"1" metavar:"<SERVER_CPU_COUNT>" json:"vcpu_count" token:"ncpu"`
+	ExtraCpuCount    int      `help:"Extra allocate cpu count" json:"extra_cpu_count"`
 	InstanceType     string   `help:"instance flavor"`
 	Vga              string   `help:"VGA driver" choices:"std|vmware|cirrus|qxl|virtio"`
 	Vdi              string   `help:"VDI protocool" choices:"vnc|spice"`
@@ -428,7 +465,7 @@ type ServerCreateOptionalOptions struct {
 	EnableCloudInit  bool     `help:"Enable cloud-init service"`
 	NoAccountInit    *bool    `help:"Not reset account password"`
 	AllowDelete      *bool    `help:"Unlock server to allow deleting" json:"-"`
-	ShutdownBehavior string   `help:"Behavior after VM server shutdown" metavar:"<SHUTDOWN_BEHAVIOR>" choices:"stop|terminate"`
+	ShutdownBehavior string   `help:"Behavior after VM server shutdown" metavar:"<SHUTDOWN_BEHAVIOR>" choices:"stop|terminate|stop_release_gpu"`
 	AutoStart        bool     `help:"Auto start server after it is created"`
 	Deploy           []string `help:"Specify deploy files in virtual server file system" json:"-"`
 	DeployTelegraf   bool     `help:"Deploy telegraf agent if guest os is supported"`
@@ -620,7 +657,6 @@ func (opts *ServerCreateOptionalOptions) OptionalParams() (*computeapi.ServerCre
 }
 
 func (opts *ServerCreateOptions) Params() (*computeapi.ServerCreateInput, error) {
-
 	params, err := opts.OptionalParams()
 	if err != nil {
 		return nil, err
@@ -660,7 +696,7 @@ type ServerUpdateOptions struct {
 	Desc             string `help:"Description" json:"description"`
 	Boot             string `help:"Boot device" choices:"disk|cdrom"`
 	Delete           string `help:"Lock server to prevent from deleting" choices:"enable|disable" json:"-"`
-	ShutdownBehavior string `help:"Behavior after VM server shutdown" choices:"stop|terminate"`
+	ShutdownBehavior string `help:"Behavior after VM server shutdown" choices:"stop|terminate|stop_release_gpu"`
 	Machine          string `help:"Machine type" choices:"q35|pc"`
 
 	IsDaemon *bool `help:"Daemon server" negative:"no-daemon"`
@@ -723,6 +759,7 @@ type ServerDeployOptions struct {
 	Deploy         []string `help:"Specify deploy files in virtual server file system" json:"-"`
 	ResetPassword  bool     `help:"Force reset password"`
 	Password       string   `help:"Default user password"`
+	LoginAccount   string   `help:"Guest login account"`
 	AutoStart      bool     `help:"Auto start server after deployed"`
 	DeployTelegraf bool     `help:"Deploy telegraf if guest os supported"`
 }
@@ -739,6 +776,7 @@ func (opts *ServerDeployOptions) Params() (jsonutils.JSONObject, error) {
 		params.ResetPassword = opts.ResetPassword
 		params.Password = opts.Password
 		params.DeployTelegraf = opts.DeployTelegraf
+		params.LoginAccount = opts.LoginAccount
 	}
 	{
 		deployInfos, err := ParseServerDeployInfoList(opts.Deploy)
@@ -971,9 +1009,11 @@ type ServerRebuildRootOptions struct {
 	ImageId       string `help:"New root Image template ID" json:"image_id" token:"image"`
 	Keypair       string `help:"ssh Keypair used for login"`
 	Password      string `help:"Default user password"`
+	LoginAccount  string `help:"Guest login account"`
 	NoAccountInit *bool  `help:"Not reset account password"`
 	AutoStart     *bool  `help:"Auto start server after it is created"`
 	AllDisks      *bool  `help:"Rebuild all disks including data disks"`
+	UserData      string `hlep:"user data scripts"`
 }
 
 func (o *ServerRebuildRootOptions) GetId() string {
@@ -988,6 +1028,9 @@ func (o *ServerRebuildRootOptions) Params() (jsonutils.JSONObject, error) {
 	if o.NoAccountInit != nil && *o.NoAccountInit {
 		params.Add(jsonutils.JSONFalse, "reset_password")
 	}
+	if o.Password != "" {
+		params.Set("reset_password", jsonutils.JSONTrue)
+	}
 	return params, nil
 }
 
@@ -997,10 +1040,11 @@ func (o *ServerRebuildRootOptions) Description() string {
 
 type ServerChangeConfigOptions struct {
 	ServerIdOptions
-	VcpuCount  *int     `help:"New number of Virtual CPU cores" json:"vcpu_count" token:"ncpu"`
-	CpuSockets *int     `help:"Cpu sockets"`
-	VmemSize   string   `help:"New memory size" json:"vmem_size" token:"vmem"`
-	Disk       []string `help:"Data disk description, from the 1st data disk to the last one, empty string if no change for this data disk"`
+	VcpuCount     *int     `help:"New number of Virtual CPU cores" json:"vcpu_count" token:"ncpu"`
+	ExtraCpuCount *int     `help:"Extra allocate cpu count" json:"extra_cpu_count"`
+	CpuSockets    *int     `help:"Cpu sockets"`
+	VmemSize      string   `help:"New memory size" json:"vmem_size" token:"vmem"`
+	Disk          []string `help:"Data disk description, from the 1st data disk to the last one, empty string if no change for this data disk"`
 
 	InstanceType string `help:"Instance Type, e.g. S2.SMALL2 for qcloud"`
 
@@ -1434,7 +1478,7 @@ func (o *ServerCPUSetOptions) Params() (jsonutils.JSONObject, error) {
 	sets := cgrouputils.ParseCpusetStr(o.SETS)
 	parts := strings.Split(sets, ",")
 	if len(parts) == 0 {
-		return nil, errors.New(fmt.Sprintf("Invalid cpu sets %q", o.SETS))
+		return nil, errors.Error(fmt.Sprintf("Invalid cpu sets %q", o.SETS))
 	}
 	input := &computeapi.ServerCPUSetInput{
 		CPUS: make([]int, 0),
@@ -1442,7 +1486,7 @@ func (o *ServerCPUSetOptions) Params() (jsonutils.JSONObject, error) {
 	for _, s := range parts {
 		sd, err := strconv.Atoi(s)
 		if err != nil {
-			return nil, errors.New(fmt.Sprintf("Not digit part %q", s))
+			return nil, errors.Wrapf(err, "Not digit part %q", s)
 		}
 		input.CPUS = append(input.CPUS, sd)
 	}
@@ -1477,6 +1521,16 @@ func (o *ServerAddSubIpsOptions) Params() (jsonutils.JSONObject, error) {
 	return jsonutils.Marshal(o), nil
 }
 
+type ServerUpdateSubIpsOptions struct {
+	ServerIdOptions
+
+	computeapi.GuestUpdateSubIpsInput
+}
+
+func (o *ServerUpdateSubIpsOptions) Params() (jsonutils.JSONObject, error) {
+	return jsonutils.Marshal(o), nil
+}
+
 type ServerSetOSInfoOptions struct {
 	ServerIdsOptions
 
@@ -1485,4 +1539,17 @@ type ServerSetOSInfoOptions struct {
 
 func (o *ServerSetOSInfoOptions) Params() (jsonutils.JSONObject, error) {
 	return jsonutils.Marshal(o), nil
+}
+
+type ServerSetRootDiskMatcher struct {
+	ROOTDISKMATCHER string `help:"Baremetal root disk matcher, e.g. 'device=/dev/sdb' 'size=900G' 'size_start=800G,size_end=900G'" json:"-"`
+	ServerIdsOptions
+}
+
+func (o *ServerSetRootDiskMatcher) Params() (jsonutils.JSONObject, error) {
+	matcher, err := cmdline.ParseBaremetalRootDiskMatcher(o.ROOTDISKMATCHER)
+	if err != nil {
+		return nil, err
+	}
+	return jsonutils.Marshal(matcher), nil
 }

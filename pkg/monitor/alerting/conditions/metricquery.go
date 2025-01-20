@@ -16,6 +16,7 @@ package conditions
 
 import (
 	gocontext "context"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -38,7 +39,7 @@ import (
 )
 
 func init() {
-	mq.RegisterMetricQuery("metricquery", func(model []*monitor.AlertCondition) (mq.MetricQuery, error) {
+	mq.RegisterMetricQuery(monitor.ConditionTypeMetricQuery, func(model []*monitor.AlertCondition) (mq.MetricQuery, error) {
 		return NewMetricQueryCondition(model)
 	})
 }
@@ -60,12 +61,18 @@ func NewMetricQueryCondition(models []*monitor.AlertCondition) (*MetricQueryCond
 		qc.Query.From = q.From
 		qc.Query.To = q.To
 		if err := validators.ValidateFromValue(qc.Query.From); err != nil {
-			return nil, errors.Wrapf(err, "from value %q", qc.Query.From)
+			return nil, errors.Wrapf(err, "validate from value %q", qc.Query.From)
 		}
 
 		if err := validators.ValidateToValue(qc.Query.To); err != nil {
-			return nil, errors.Wrapf(err, "to value %q", qc.Query.To)
+			return nil, errors.Wrapf(err, "validate to value %q", qc.Query.To)
 		}
+		reducer, err := NewAlertReducer(&model.Reducer)
+		if err != nil {
+			return nil, errors.Wrapf(err, "NewAlertReducer")
+		}
+		qc.Reducer = reducer
+		qc.ReducerOrder = model.ReducerOrder
 		qc.setResType()
 		cond.QueryCons = append(cond.QueryCons, *qc)
 	}
@@ -73,7 +80,47 @@ func NewMetricQueryCondition(models []*monitor.AlertCondition) (*MetricQueryCond
 	return cond, nil
 }
 
-func (query *MetricQueryCondition) ExecuteQuery(userCred mcclient.TokenCredential, skipCheckSeries bool) (*mq.Metrics, error) {
+type queryReducedResultSorter struct {
+	r     *queryResult
+	order monitor.ResultReducerOrder
+}
+
+func newQueryReducedResultSorter(
+	r *queryResult,
+	order monitor.ResultReducerOrder) *queryReducedResultSorter {
+	return &queryReducedResultSorter{
+		r:     r,
+		order: order,
+	}
+}
+
+func (q *queryReducedResultSorter) Len() int {
+	return len(q.r.reducedResult.Result)
+}
+
+func (q *queryReducedResultSorter) Less(i, j int) bool {
+	vi, vj := q.r.reducedResult.Result[i], q.r.reducedResult.Result[j]
+	if q.order == monitor.RESULT_REDUCER_ORDER_ASC {
+		if vi < vj {
+			return true
+		}
+		return false
+	}
+	if vi > vj {
+		return true
+	}
+	return false
+}
+
+func (q *queryReducedResultSorter) Swap(i, j int) {
+	q.r.reducedResult.Result[i], q.r.reducedResult.Result[j] = q.r.reducedResult.Result[j], q.r.reducedResult.Result[i]
+	q.r.series[i], q.r.series[j] = q.r.series[j], q.r.series[i]
+	if len(q.r.metas) > i && len(q.r.metas) > j {
+		q.r.metas[i], q.r.metas[j] = q.r.metas[j], q.r.metas[i]
+	}
+}
+
+func (query *MetricQueryCondition) ExecuteQuery(userCred mcclient.TokenCredential, scope string, skipCheckSeries bool) (*monitor.MetricsQueryResult, error) {
 	firstCond := query.QueryCons[0]
 	timeRange := tsdb.NewTimeRange(firstCond.Query.From, firstCond.Query.To)
 	ctx := gocontext.Background()
@@ -87,34 +134,67 @@ func (query *MetricQueryCondition) ExecuteQuery(userCred mcclient.TokenCredentia
 	var qr *queryResult
 	var err error
 
-	queryInfluxdb := func() (*queryResult, error) {
-		startTime := time.Now()
-		queryResult, err := query.executeQuery(&evalContext, timeRange)
-		if err != nil {
-			return nil, errors.Wrap(err, "query.executeQuery")
-		}
-		log.Debugf("query metrics from influxdb elapsed: %s", time.Since(startTime))
-		return queryResult, nil
+	ds, err := datasource.GetDefaultSource("")
+	if err != nil {
+		return nil, errors.Wrapf(err, "Can't find default datasource")
 	}
 
-	if query.noCheckSeries(skipCheckSeries) {
-		qr, err = queryInfluxdb()
+	sortMetrics := func(metrics *queryResult, order monitor.ResultReducerOrder) *queryResult {
+		if metrics.reducedResult != nil && len(metrics.reducedResult.Result) > 0 {
+			s := newQueryReducedResultSorter(metrics, order)
+			sort.Sort(s)
+			return s.r
+		}
+		return metrics
+	}
+
+	queryTSDB := func() (*queryResult, error) {
+		startTime := time.Now()
+
+		queryResult, err := query.executeQuery(ds, &evalContext, timeRange)
 		if err != nil {
-			return nil, err
+			return nil, errors.Wrapf(err, "query.executeQuery from %s", ds.Type)
 		}
-		metrics := mq.Metrics{
-			Series: make(tsdb.TimeSeriesSlice, 0),
-			Metas:  qr.metas,
+		log.Debugf("query metrics from TSDB %q elapsed: %s", ds.Type, time.Since(startTime))
+		if firstCond.Reducer.GetType() != "" {
+			if queryResult.reducedResult == nil {
+				queryResult.reducedResult = &monitor.ReducedResult{
+					Reducer: monitor.Condition{
+						Type:   string(firstCond.Reducer.GetType()),
+						Params: firstCond.Reducer.GetParams(),
+					},
+					Result: make([]float64, len(queryResult.series)),
+				}
+			}
+			for i, ss := range queryResult.series {
+				resultReducerValue, _ := firstCond.Reducer.Reduce(ss)
+				if resultReducerValue != nil {
+					queryResult.reducedResult.Result[i] = *resultReducerValue
+				}
+			}
 		}
-		metrics.Series = qr.series
-		return &metrics, nil
+		return sortMetrics(queryResult, firstCond.ReducerOrder), nil
+	}
+
+	noCheck := query.noCheckSeries(skipCheckSeries)
+	if noCheck {
+		qr, err = queryTSDB()
+		if err != nil {
+			return nil, errors.Wrap(err, "queryTSDB")
+		}
+		metrics := &monitor.MetricsQueryResult{
+			Series:        qr.series,
+			Metas:         qr.metas,
+			ReducedResult: qr.reducedResult,
+		}
+		return metrics, nil
 	}
 
 	qInfluxdbCh := make(chan bool, 0)
 	qRegionCh := make(chan bool, 0)
 
 	go func() {
-		qr, err = queryInfluxdb()
+		qr, err = queryTSDB()
 		qInfluxdbCh <- true
 	}()
 
@@ -131,7 +211,7 @@ func (query *MetricQueryCondition) ExecuteQuery(userCred mcclient.TokenCredentia
 		}()
 
 		s := auth.GetSession(ctx, userCred, "")
-		ress, regionErr = firstCond.getOnecloudResources(s, false)
+		ress, regionErr = firstCond.getOnecloudResources(s, scope, false)
 		if err != nil {
 			regionErr = errors.Wrap(regionErr, "get resources from region")
 			return
@@ -163,9 +243,10 @@ func (query *MetricQueryCondition) ExecuteQuery(userCred mcclient.TokenCredentia
 	//	firstCond.FillSerieByResourceField(resource, serie)
 	//	metrics.Series = append(metrics.Series, serie)
 	//}
-	metrics := mq.Metrics{
-		Series: make(tsdb.TimeSeriesSlice, 0),
-		Metas:  qr.metas,
+	metrics := monitor.MetricsQueryResult{
+		Series:        make(monitor.TimeSeriesSlice, 0),
+		Metas:         qr.metas,
+		ReducedResult: qr.reducedResult,
 	}
 	mtx := sync.Mutex{}
 	workqueue.Parallelize(4, len(qr.series), func(piece int) {
@@ -181,6 +262,7 @@ func (query *MetricQueryCondition) ExecuteQuery(userCred mcclient.TokenCredentia
 	})
 	log.Debugf("fill metrics tag elapsed: %s", time.Since(startTime))
 	log.Debugf("all steps elapsed: %s", time.Since(allStartTime))
+
 	return &metrics, nil
 }
 
@@ -211,21 +293,29 @@ func (query *MetricQueryCondition) noCheckSeries(skipCheckSeries bool) bool {
 			return false
 		}
 	}
+
+	containNoCheckAggregator := false
+	sels := firstCond.Query.Model.Selects
+	lastSel := sels[len(sels)-1]
+	for _, part := range lastSel {
+		if utils.IsInStringArray(part.Type, []string{"sum"}) {
+			containNoCheckAggregator = true
+		}
+	}
+
 	if containGlob {
+		if containNoCheckAggregator {
+			return true
+		}
 		return false
 	}
 	return true
 }
 
-func (c *MetricQueryCondition) executeQuery(context *alerting.EvalContext, timeRange *tsdb.TimeRange) (*queryResult, error) {
-	ds, err := datasource.GetDefaultSource("")
-	if err != nil {
-		return nil, errors.Wrapf(err, "Can't find default datasource")
-	}
-
+func (c *MetricQueryCondition) executeQuery(ds *tsdb.DataSource, context *alerting.EvalContext, timeRange *tsdb.TimeRange) (*queryResult, error) {
 	req := c.getRequestQuery(ds, timeRange, context.IsDebug)
-	result := make(tsdb.TimeSeriesSlice, 0)
-	metas := make([]tsdb.QueryResultMeta, 0)
+	result := make(monitor.TimeSeriesSlice, 0)
+	metas := make([]monitor.QueryResultMeta, 0)
 
 	if context.IsDebug {
 		setContextLog(context, req)

@@ -21,6 +21,8 @@ import (
 	"strings"
 	"time"
 
+	alierr "github.com/aliyun/alibaba-cloud-sdk-go/sdk/errors"
+
 	"yunion.io/x/jsonutils"
 	"yunion.io/x/log"
 	"yunion.io/x/pkg/errors"
@@ -142,6 +144,7 @@ func (self *SRegion) GetInstances(zoneId string, ids []string) ([]SInstance, err
 	params := make(map[string]string)
 	params["RegionId"] = self.RegionId
 	params["MaxResults"] = "100"
+	params["AdditionalAttributes.1"] = "NETWORK_PRIMARY_ENI_IP"
 
 	if len(zoneId) > 0 {
 		params["ZoneId"] = zoneId
@@ -243,16 +246,9 @@ func (a byAttachedTime) Less(i, j int) bool {
 }
 
 func (self *SInstance) GetIDisks() ([]cloudprovider.ICloudDisk, error) {
-	disks := []SDisk{}
-	for {
-		part, total, err := self.host.zone.region.GetDisks(self.InstanceId, "", "", nil, len(disks), 50)
-		if err != nil {
-			return nil, errors.Wrapf(err, "GetDisks for %s", self.InstanceId)
-		}
-		disks = append(disks, part...)
-		if len(disks) >= total {
-			break
-		}
+	disks, err := self.host.zone.region.GetDisks(self.InstanceId, "", "", nil, "")
+	if err != nil {
+		return nil, errors.Wrapf(err, "GetDisks for %s", self.InstanceId)
 	}
 
 	sort.Sort(byAttachedTime(disks))
@@ -282,6 +278,11 @@ func (self *SInstance) GetINics() ([]cloudprovider.ICloudNic, error) {
 			id:       networkInterface.NetworkInterfaceId,
 			ipAddr:   networkInterface.PrimaryIpAddress,
 			macAddr:  networkInterface.MacAddress,
+		}
+		for _, ipv6 := range networkInterface.Ipv6Sets.Ipv6Set {
+			if len(ipv6.Ipv6Address) > 0 {
+				nic.ip6Addr = ipv6.Ipv6Address
+			}
 		}
 		nics = append(nics, &nic)
 	}
@@ -466,17 +467,8 @@ func (self *SInstance) UpdateVM(ctx context.Context, input cloudprovider.SInstan
 	return self.host.zone.region.UpdateVM(self.InstanceId, input, self.OSType)
 }
 
-func (self *SInstance) DeployVM(ctx context.Context, name string, username string, password string, publicKey string, deleteKeypair bool, description string) error {
-	var keypairName string
-	if len(publicKey) > 0 {
-		var err error
-		keypairName, err = self.host.zone.region.syncKeypair(publicKey)
-		if err != nil {
-			return err
-		}
-	}
-
-	return self.host.zone.region.DeployVM(self.InstanceId, name, password, keypairName, deleteKeypair, description)
+func (self *SInstance) DeployVM(ctx context.Context, opts *cloudprovider.SInstanceDeployOptions) error {
+	return self.host.zone.region.DeployVM(self.InstanceId, opts)
 }
 
 func (self *SInstance) RebuildRoot(ctx context.Context, desc *cloudprovider.SManagedVMRebuildRootConfig) (string, error) {
@@ -756,25 +748,6 @@ func (self *SRegion) doDeleteVM(instanceId string) error {
 	return self.instanceOperation(instanceId, "DeleteInstance", params)
 }
 
-/*func (self *SRegion) waitInstanceStatus(instanceId string, target string, interval time.Duration, timeout time.Duration) error {
-	startTime := time.Now()
-	for time.Now().Sub(startTime) < timeout {
-		status, err := self.GetInstanceStatus(instanceId)
-		if err != nil {
-			return err
-		}
-		if status == target {
-			return nil
-		}
-		time.Sleep(interval)
-	}
-	return cloudprovider.ErrTimeout
-}
-
-func (self *SInstance) waitStatus(target string, interval time.Duration, timeout time.Duration) error {
-	return self.host.zone.region.waitInstanceStatus(self.InstanceId, target, interval, timeout)
-}*/
-
 func (self *SRegion) StartVM(instanceId string) error {
 	status, err := self.GetInstanceStatus(instanceId)
 	if err != nil {
@@ -786,10 +759,6 @@ func (self *SRegion) StartVM(instanceId string) error {
 		return cloudprovider.ErrInvalidStatus
 	}
 	return self.doStartVM(instanceId)
-	// if err != nil {
-	//	return err
-	// }
-	// return self.waitInstanceStatus(instanceId, InstanceStatusRunning, time.Second*5, time.Second*180) // 3 minutes to timeout
 }
 
 func (self *SRegion) StopVM(instanceId string, isForce, stopCharging bool) error {
@@ -806,10 +775,6 @@ func (self *SRegion) StopVM(instanceId string, isForce, stopCharging bool) error
 		return cloudprovider.ErrInvalidStatus
 	}
 	return self.doStopVM(instanceId, isForce, stopCharging)
-	// if err != nil {
-	//  return err
-	// }
-	// return self.waitInstanceStatus(instanceId, InstanceStatusStopped, time.Second*10, time.Second*300) // 5 minutes to timeout
 }
 
 func (self *SRegion) DeleteVM(instanceId string) error {
@@ -823,81 +788,83 @@ func (self *SRegion) DeleteVM(instanceId string) error {
 		log.Warningf("DeleteVM: vm status is %s expect %s", status, InstanceStatusStopped)
 	}
 	return self.doDeleteVM(instanceId)
-	// if err != nil {
-	// 	return err
-	// }
-	// err = self.waitInstanceStatus(instanceId, InstanceStatusRunning, time.Second*10, time.Second*300) // 5 minutes to timeout
-	// if err == cloudprovider.ErrNotFound {
-	// 	return nil
-	// } else if err == nil {
-	// 	return cloudprovider.ErrTimeout
-	// } else {
-	// 	return err
-	// }
 }
 
-func (self *SRegion) DeployVM(instanceId string, name string, password string, keypairName string, deleteKeypair bool, description string) error {
+func (self *SRegion) DeployVM(instanceId string, opts *cloudprovider.SInstanceDeployOptions) error {
 	instance, err := self.GetInstance(instanceId)
 	if err != nil {
 		return err
 	}
 
 	// 修改密钥时直接返回
-	if deleteKeypair {
+	if opts.DeleteKeypair {
 		err = self.DetachKeyPair(instanceId, instance.KeyPairName)
 		if err != nil {
 			return err
 		}
 	}
 
-	if len(keypairName) > 0 {
+	var keypairName string
+	if len(opts.PublicKey) > 0 {
+		var err error
+		keypairName, err = self.syncKeypair(opts.PublicKey)
+		if err != nil {
+			return err
+		}
 		err = self.AttachKeypair(instanceId, keypairName)
 		if err != nil {
 			return err
 		}
 	}
 
-	params := make(map[string]string)
-
-	// if resetPassword {
-	//	params["Password"] = seclib2.RandomPassword2(12)
-	// }
 	// 指定密码的情况下，使用指定的密码
-	if len(password) > 0 {
-		params["Password"] = password
-	}
-
-	if len(name) > 0 && instance.InstanceName != name {
-		params["InstanceName"] = name
-	}
-
-	if len(description) > 0 && instance.Description != description {
-		params["Description"] = description
-	}
-
-	if len(params) > 0 {
+	if len(opts.Password) > 0 {
+		params := make(map[string]string)
+		params["Password"] = opts.Password
 		return self.modifyInstanceAttribute(instanceId, params)
-	} else {
-		return nil
 	}
+
+	return nil
 }
 
 func (self *SInstance) DeleteVM(ctx context.Context) error {
+	// 未到期包年包月实例需要先转换到按量计费后, 进行删除
+	if self.GetBillingType() == billing_api.BILLING_TYPE_PREPAID && self.GetExpiredAt().After(time.Now()) {
+		err := self.host.zone.region.ConvertVmPostpaid([]string{self.InstanceId})
+		if err != nil {
+			log.Warningf("convert vm %s to postpaid error: %v", self.InstanceId, err)
+		}
+	}
 	for {
 		err := self.host.zone.region.DeleteVM(self.InstanceId)
-		if err != nil {
-			if isError(err, "IncorrectInstanceStatus.Initializing") {
-				log.Infof("The instance is initializing, try later ...")
-				time.Sleep(10 * time.Second)
-			} else {
-				log.Errorf("DeleteVM fail: %s", err)
-				return err
-			}
-		} else {
+		if err == nil {
 			break
+		}
+		e, ok := errors.Cause(err).(*alierr.ServerError)
+		if !ok {
+			return err
+		}
+		switch e.ErrorCode() {
+		case "IncorrectInstanceStatus.Initializing":
+			time.Sleep(10 * time.Second)
+		case "LastTokenProcessing": // 等待转换按量付费完成
+			time.Sleep(10 * time.Second)
+		default:
+			return err
 		}
 	}
 	return cloudprovider.WaitDeleted(self, 10*time.Second, 300*time.Second) // 5minutes
+}
+
+func (self *SRegion) ConvertVmPostpaid(instanceIds []string) error {
+	params := map[string]string{
+		"RegionId":           self.RegionId,
+		"InstanceIds":        jsonutils.Marshal(instanceIds).String(),
+		"InstanceChargeType": "PostPaid",
+		"ClientToken":        utils.GenRequestId(20),
+	}
+	_, err := self.ecsRequest("ModifyInstanceChargeType", params)
+	return err
 }
 
 func (self *SRegion) UpdateVM(instanceId string, input cloudprovider.SInstanceUpdateOptions, osType string) error {
@@ -907,7 +874,12 @@ func (self *SRegion) UpdateVM(instanceId string, input cloudprovider.SInstanceUp
 	*/
 	params := make(map[string]string)
 	params["InstanceName"] = input.NAME
-	params["Description"] = input.Description
+	if len(input.HostName) > 0 {
+		params["HostName"] = input.HostName
+	}
+	if len(input.Description) > 0 {
+		params["Description"] = input.Description
+	}
 	return self.modifyInstanceAttribute(instanceId, params)
 }
 
@@ -986,12 +958,11 @@ func (self *SRegion) AttachDisk(instanceId string, diskId string) error {
 	params := make(map[string]string)
 	params["InstanceId"] = instanceId
 	params["DiskId"] = diskId
+	params["DeleteWithInstance"] = "true"
 	_, err := self.ecsRequest("AttachDisk", params)
 	if err != nil {
-		log.Errorf("AttachDisk %s to %s fail %s", diskId, instanceId, err)
-		return err
+		return errors.Wrapf(err, "AttachDisk %s => %s", diskId, instanceId)
 	}
-
 	return nil
 }
 

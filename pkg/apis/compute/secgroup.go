@@ -42,7 +42,7 @@ type SSecgroupRuleResource struct {
 	// | tcp      | TCP     |
 	// | icmp     | ICMP    |
 	// | udp      | UDP     |
-	// enum: any, tcp, udp, icmp
+	// enum: ["any", "tcp", "udp", "icmp"]
 	Protocol string `json:"protocol"`
 
 	// 端口列表, 参数为空代表任意端口
@@ -62,7 +62,7 @@ type SSecgroupRuleResource struct {
 	PortEnd int
 
 	// 方向
-	// enum: in, out
+	// enum: ["in", "out"]
 	// required: true
 	Direction string `json:"direction"`
 
@@ -73,7 +73,7 @@ type SSecgroupRuleResource struct {
 	// 行为
 	// deny: 拒绝
 	// allow: 允许
-	// enum: deny, allow
+	// enum: ["deny", "allow"]
 	// required: true
 	Action string `json:"action"`
 
@@ -120,13 +120,13 @@ type SSecgroupRuleUpdateInput struct {
 	// | tcp      | TCP     |
 	// | icmp     | ICMP    |
 	// | udp      | UDP     |
-	// enum: any, tcp, udp, icmp
+	// enum: ["any", "tcp", "udp", "icmp"]
 	Protocol *string `json:"protocol"`
 
 	// 行为
 	// deny: 拒绝
 	// allow: 允许
-	// enum: deny, allow
+	// enum: ["deny", "allow"]
 	// required: true
 	Action *string `json:"action"`
 
@@ -159,11 +159,12 @@ func (input *SSecgroupRuleResource) Check() error {
 	}
 
 	if len(input.CIDR) > 0 {
-		if !regutils.MatchCIDR(input.CIDR) && !regutils.MatchIPAddr(input.CIDR) {
+		if !regutils.MatchCIDR(input.CIDR) && !regutils.MatchIP4Addr(input.CIDR) && !regutils.MatchCIDR6(input.CIDR) && !regutils.MatchIP6Addr(input.CIDR) {
 			return fmt.Errorf("invalid ip address: %s", input.CIDR)
 		}
 	} else {
-		input.CIDR = "0.0.0.0/0"
+		// empty CIDR means both IPv4 and IPv6
+		// input.CIDR = "0.0.0.0/0"
 	}
 
 	return rule.ValidateRule()
@@ -215,6 +216,8 @@ type SecgroupListInput struct {
 	Direction string `json:"direction"`
 
 	VpcId string `json:"vpc_id"`
+
+	LoadbalancerId string `json:"loadbalancer_id"`
 	RegionalFilterListInput
 	ManagedResourceListInput
 }
@@ -273,6 +276,14 @@ type SecgroupDetails struct {
 	// admin_secgrp_id为此安全组的云主机数量, , 不包含回收站云主机
 	AdminGuestCnt int `json:"admin_guest_cnt,allowempty"`
 
+	// 关联LB数量
+	LoadbalancerCnt int `json:"loadbalancer_cnt,allowempty"`
+
+	// 关联RDS数量
+	RdsCnt int `json:"rds_cnt,allowempty"`
+	// 关联Redis数量
+	RedisCnt int `json:"redis_cnt,allowempty"`
+
 	// 所有关联的资源数量
 	TotalCnt int `json:"total_cnt,allowempty"`
 }
@@ -301,11 +312,6 @@ type GuestsecgroupDetails struct {
 	Secgroup string `json:"secgroup"`
 }
 
-//type SElasticcachesecgroup struct {
-//	SElasticcacheJointsBase
-//	SSecurityGroupResourceBase
-//}
-
 type ElasticcachesecgroupDetails struct {
 	ElasticcacheJointResourceDetails
 
@@ -330,15 +336,16 @@ type SecgroupJsonDesc struct {
 }
 
 type SSecurityGroupRef struct {
-	GuestCnt      int `json:"guest_cnt"`
-	AdminGuestCnt int `json:"admin_guest_cnt"`
-	RdsCnt        int `json:"rds_cnt"`
-	RedisCnt      int `json:"redis_cnt"`
-	TotalCnt      int `json:"total_cnt"`
+	GuestCnt        int `json:"guest_cnt"`
+	AdminGuestCnt   int `json:"admin_guest_cnt"`
+	RdsCnt          int `json:"rds_cnt"`
+	RedisCnt        int `json:"redis_cnt"`
+	LoadbalancerCnt int `json:"loadbalancer_cnt"`
+	TotalCnt        int `json:"total_cnt"`
 }
 
 func (self *SSecurityGroupRef) Sum() {
-	self.TotalCnt = self.GuestCnt + self.AdminGuestCnt + self.RdsCnt + self.RedisCnt
+	self.TotalCnt = self.GuestCnt + self.AdminGuestCnt + self.RdsCnt + self.RedisCnt + self.LoadbalancerCnt
 }
 
 type SecurityGroupSyncstatusInput struct {

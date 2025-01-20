@@ -23,10 +23,9 @@ import (
 	"yunion.io/x/log"
 	"yunion.io/x/pkg/errors"
 
-	"yunion.io/x/onecloud/pkg/hostman/guestman/desc"
 	deployapi "yunion.io/x/onecloud/pkg/hostman/hostdeployer/apis"
 	"yunion.io/x/onecloud/pkg/hostman/hostdeployer/deployclient"
-	hostutils "yunion.io/x/onecloud/pkg/hostman/hostutils"
+	"yunion.io/x/onecloud/pkg/hostman/hostutils"
 	"yunion.io/x/onecloud/pkg/hostman/storageman"
 )
 
@@ -37,13 +36,8 @@ func (m *SGuestManager) GuestCreateFromEsxi(
 	if !ok {
 		return nil, hostutils.ParamsError
 	}
-	guest, _ := m.GetServer(createConfig.Sid)
-	if err := guest.SaveSourceDesc(createConfig.GuestDesc); err != nil {
-		return nil, err
-	}
-	guest.Desc = new(desc.SGuestDesc)
-	jsonutils.Marshal(createConfig.GuestDesc).Unmarshal(guest.Desc)
-	if err := guest.SaveLiveDesc(guest.Desc); err != nil {
+	guest, _ := m.GetKVMServer(createConfig.Sid)
+	if err := SaveDesc(guest, createConfig.GuestDesc); err != nil {
 		return nil, err
 	}
 
@@ -99,7 +93,7 @@ func (m *SGuestManager) GuestCreateFromEsxi(
 			var diskInfo jsonutils.JSONObject
 			diskId := disksDesc[i].DiskId
 			iDisk := storage.CreateDisk(diskId)
-			diskInfo, err = iDisk.CreateRaw(ctx, 0, "qcow2", "", nil, "", connections.Disks[i].DiskPath)
+			diskInfo, err = iDisk.CreateRaw(ctx, 0, "qcow2", "", nil, nil, "", connections.Disks[i].DiskPath)
 			if err != nil {
 				err = errors.Wrapf(err, "create disk %s failed", diskId)
 				log.Errorf(err.Error())
@@ -127,13 +121,8 @@ func (m *SGuestManager) GuestCreateFromCloudpods(
 	if !ok {
 		return nil, hostutils.ParamsError
 	}
-	guest, _ := m.GetServer(createConfig.Sid)
-	if err := guest.SaveSourceDesc(createConfig.GuestDesc); err != nil {
-		return nil, err
-	}
-	guest.Desc = new(desc.SGuestDesc)
-	jsonutils.Marshal(createConfig.GuestDesc).Unmarshal(guest.Desc)
-	if err := guest.SaveLiveDesc(guest.Desc); err != nil {
+	guest, _ := m.GetKVMServer(createConfig.Sid)
+	if err := SaveDesc(guest, createConfig.GuestDesc); err != nil {
 		return nil, err
 	}
 	var err error

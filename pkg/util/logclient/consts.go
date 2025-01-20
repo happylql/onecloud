@@ -28,6 +28,7 @@ const (
 	ACT_CLOUD_FULLSYNC               = "cloud_fullsync"
 	ACT_CLOUD_SYNC                   = "cloud_sync"
 	ACT_CREATE                       = "create"
+	ACT_POST_CREATE_HOOK             = "post_create_hook"
 	ACT_DELETE                       = "delete"
 	ACT_PENDING_DELETE               = "pending_delete"
 	ACT_DISABLE                      = "disable"
@@ -142,6 +143,7 @@ const (
 	ACT_GUEST_CREATE_FROM_IMPORT    = "guest_create_from_import"
 	ACT_GUEST_PANICKED              = "guest_panicked"
 	ACT_HOST_MAINTAINING            = "host_maintaining"
+	ACT_HOST_UNMAINTENANCE          = "host_unmaintenance"
 
 	ACT_MKDIR          = "mkdir"
 	ACT_DELETE_OBJECT  = "delete_object"
@@ -244,6 +246,13 @@ const (
 	ACT_CONSOLE           = "console"
 	ACT_WEBSSH            = "webssh"
 	ACT_SET_USER_PASSWORD = "set_user_password"
+	ACT_MAKESSHABLE       = "make_sshable"
+	ACT_TRYSSHABLE        = "try_sshable"
+
+	ACT_ISO_ATTACH = "iso_attach"
+	ACT_ISO_DETACH = "iso_detach"
+
+	ACT_SYNC_OS_INFO = "sync_os_info"
 
 	ACT_PANIC = "panic"
 
@@ -261,6 +270,7 @@ const (
 	ACT_DISSOCIATE = "dissociate"
 
 	ACT_BIND     = "bind"
+	ACT_UNBIND   = "unbind"
 	ACT_PROGRESS = "progress"
 
 	ACT_ADD_BASTION_SERVER = "add_bastion_server"
@@ -276,4 +286,31 @@ const (
 	ACT_DELETE_SECURITY_GROUP_RULE = "delete_security_group_rule"
 
 	ACT_CLEAN_PROJECT = "clean_project"
+	ACT_JOIN_PROJECT  = "join_project"
+	ACT_LEAVE_PROJECT = "leave_project"
+
+	ACT_SET_SCHED_TAG    = "set_sched_tag"
+	ACT_RESET_CREDENTIAL = "reset_credential"
+
+	ACT_AUTO_MIGRATE_ON_HOST_DOWN                 = "auto_migrate_on_host"
+	ACT_SET_RESERVE_RESOURCE_FOR_ISOLATED_DEVICES = "set_reserve_resource_for_isolated_devices"
+
+	ACT_UNCONVERT_START    = "unconverting"
+	ACT_UNCONVERT_COMPLETE = "unconverted"
+	ACT_SET_COMMIT_BOUND   = "set_commit_bound"
+
+	ACT_COLLECT_METRICS = "collect_metrics"
+
+	ACT_CONFIGURE            = "configure"
+	ACT_ACTIVATE             = "activate"
+	ACT_SUSPEND              = "suspend"
+	ACT_APPROVED             = "approved"
+	ACT_REJECTED             = "rejected"
+	ACT_TRANSFERRED          = "transferred"
+	ACT_TRANSFERRED_REJECTED = "trans_rejected"
+	ACT_ADD_RATE             = "add_rate"
+	ACT_REMOVE_RATE          = "remove_rate"
+
+	ACT_CLONE   = "clone"
+	ACT_REBUILD = "rebuild"
 )

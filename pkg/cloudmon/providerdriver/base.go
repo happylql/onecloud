@@ -146,6 +146,7 @@ func (self *SCollectByResourceIdDriver) CollectDBInstanceMetrics(ctx context.Con
 				EndTime:      end,
 			}
 			opts.ResourceId = rds.ExternalId
+			opts.RegionExtId = rds.RegionExtId
 			opts.Engine = rds.Engine
 
 			tags := []influxdb.SKeyValue{}
@@ -195,7 +196,11 @@ func (self *SCollectByResourceIdDriver) CollectDBInstanceMetrics(ctx context.Con
 }
 
 func (self *SCollectByResourceIdDriver) CollectServerMetrics(ctx context.Context, manager api.CloudproviderDetails, provider cloudprovider.ICloudProvider, res map[string]api.ServerDetails, start, end time.Time) error {
-	ch := make(chan struct{}, options.Options.CloudResourceCollectMetricsBatchCount)
+	cnt := options.Options.CloudResourceCollectMetricsBatchCount
+	if manager.Provider == api.CLOUD_PROVIDER_ORACLE { // oracle 限速
+		cnt = options.Options.OracleCloudResourceCollectMetricsBatchCount
+	}
+	ch := make(chan struct{}, cnt)
 	defer close(ch)
 	metrics := []influxdb.SMetricData{}
 	var wg sync.WaitGroup
@@ -601,6 +606,7 @@ func (self *SCollectByResourceIdDriver) CollectLoadbalancerMetrics(ctx context.C
 				EndTime:      end,
 			}
 			opts.ResourceId = lb.ExternalId
+			opts.RegionExtId = lb.RegionExtId
 
 			tags := []influxdb.SKeyValue{}
 			for k, v := range lb.GetMetricTags() {

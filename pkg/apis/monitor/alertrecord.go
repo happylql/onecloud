@@ -39,6 +39,7 @@ type AlertRecordListInput struct {
 	ResType  string `json:"res_type"`
 	Alerting bool   `json:"alerting"`
 	ResName  string `json:"res_name"`
+	ResId    string `json:"res_id"`
 }
 
 type AlertRecordDetails struct {
@@ -71,12 +72,12 @@ type AlertRecordCreateInput struct {
 
 	AlertId string `json:"alert_id"`
 	// 报警级别
-	Level     string       `json:"level"`
-	State     string       `json:"state"`
-	SendState string       `json:"send_state"`
-	ResType   string       `json:"res_type"`
-	EvalData  []*EvalMatch `json:"eval_data"`
-	AlertRule AlertRecordRule
+	Level     string             `json:"level"`
+	State     string             `json:"state"`
+	SendState string             `json:"send_state"`
+	ResType   string             `json:"res_type"`
+	EvalData  []*EvalMatch       `json:"eval_data"`
+	AlertRule []*AlertRecordRule `json:"alert_rule"`
 }
 
 type AlertRecordRule struct {
@@ -96,4 +97,5 @@ type AlertRecordRule struct {
 	ConditionType string `json:"condition_type"`
 	// 静默期
 	SilentPeriod string `json:"silent_period"`
+	Reducer      string `json:"reducer"`
 }

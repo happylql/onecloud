@@ -15,12 +15,14 @@
 package session
 
 import (
+	"context"
 	"fmt"
 	"net/url"
 	"os/exec"
 
 	"yunion.io/x/cloudmux/pkg/cloudprovider"
 	"yunion.io/x/jsonutils"
+	"yunion.io/x/pkg/errors"
 
 	api "yunion.io/x/onecloud/pkg/apis/webconsole"
 	"yunion.io/x/onecloud/pkg/mcclient"
@@ -48,6 +50,8 @@ const (
 	CLOUDPODS  = api.CLOUDPODS
 	PROXMOX    = api.PROXMOX
 	VOLCENGINE = api.VOLC_ENGINE
+	BAIDU      = api.BAIDU
+	SANGFOR    = api.SANGFOR
 )
 
 type RemoteConsoleInfo struct {
@@ -126,7 +130,7 @@ func (info *RemoteConsoleInfo) GetConnectParams() (string, error) {
 		return info.getQcloudURL()
 	case CLOUDPODS:
 		return info.getCloudpodsURL()
-	case OPENSTACK, VMRC, ZSTACK, CTYUN, HUAWEI, HCS, JDCLOUD, PROXMOX:
+	case OPENSTACK, VMRC, ZSTACK, CTYUN, HUAWEI, HCS, JDCLOUD, PROXMOX, SANGFOR, BAIDU:
 		return info.Url, nil
 	case VOLCENGINE:
 		return info.getVolcEngineURL()
@@ -210,4 +214,20 @@ func (info *RemoteConsoleInfo) getApsaraURL() (string, error) {
 
 func (info *RemoteConsoleInfo) GetRecordObject() *recorder.Object {
 	return nil
+}
+
+func (info *RemoteConsoleInfo) GetDisplayInfo(ctx context.Context) (*SDisplayInfo, error) {
+	userInfo, err := fetchUserInfo(ctx, info.GetClientSession())
+	if err != nil {
+		return nil, errors.Wrap(err, "fetchUserInfo")
+	}
+	guestDetails, err := FetchServerInfo(ctx, info.GetClientSession(), info.Id)
+	if err != nil {
+		return nil, errors.Wrap(err, "FetchServerInfo")
+	}
+
+	dispInfo := SDisplayInfo{}
+	dispInfo.WaterMark = fetchWaterMark(userInfo)
+	dispInfo.fetchGuestInfo(guestDetails)
+	return &dispInfo, nil
 }

@@ -37,6 +37,10 @@ func (self *SKsyunProviderFactory) GetName() string {
 	return ksyun.CLOUD_PROVIDER_KSYUN_CN
 }
 
+func (self *SKsyunProviderFactory) IsReadOnly() bool {
+	return true
+}
+
 func (self *SKsyunProviderFactory) ValidateCreateCloudaccountData(ctx context.Context, input cloudprovider.SCloudaccountCredential) (cloudprovider.SCloudaccount, error) {
 	output := cloudprovider.SCloudaccount{}
 	if len(input.AccessKeyId) == 0 {
@@ -123,16 +127,16 @@ func (self *SKsyunProvider) GetAccountId() string {
 	return self.client.GetAccountId()
 }
 
-func (self *SKsyunProvider) GetIRegions() []cloudprovider.ICloudRegion {
+func (self *SKsyunProvider) GetIRegions() ([]cloudprovider.ICloudRegion, error) {
 	regions, err := self.client.GetRegions()
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	ret := []cloudprovider.ICloudRegion{}
 	for i := range regions {
 		ret = append(ret, &regions[i])
 	}
-	return ret
+	return ret, nil
 }
 
 func (self *SKsyunProvider) GetIRegionById(extId string) (cloudprovider.ICloudRegion, error) {
@@ -163,7 +167,7 @@ func (self *SKsyunProvider) GetBalance() (*cloudprovider.SBalanceInfo, error) {
 }
 
 func (self *SKsyunProvider) GetIProjects() ([]cloudprovider.ICloudProject, error) {
-	return []cloudprovider.ICloudProject{}, nil
+	return self.client.GetIProjects()
 }
 
 func (self *SKsyunProvider) CreateIProject(name string) (cloudprovider.ICloudProject, error) {
@@ -204,4 +208,32 @@ func (self *SKsyunProvider) GetCloudRegionExternalIdPrefix() string {
 
 func (self *SKsyunProvider) GetMetrics(opts *cloudprovider.MetricListOptions) ([]cloudprovider.MetricValues, error) {
 	return nil, cloudprovider.ErrNotImplemented
+}
+
+func (self *SKsyunProvider) CreateIClouduser(conf *cloudprovider.SClouduserCreateConfig) (cloudprovider.IClouduser, error) {
+	return self.client.CreateIClouduser(conf)
+}
+
+func (self *SKsyunProvider) GetICloudusers() ([]cloudprovider.IClouduser, error) {
+	return self.client.GetICloudusers()
+}
+
+func (self *SKsyunProvider) GetIClouduserByName(name string) (cloudprovider.IClouduser, error) {
+	return self.client.GetIClouduserByName(name)
+}
+
+func (self *SKsyunProvider) GetICloudgroups() ([]cloudprovider.ICloudgroup, error) {
+	return self.client.GetICloudgroups()
+}
+
+func (self *SKsyunProvider) CreateICloudgroup(name, desc string) (cloudprovider.ICloudgroup, error) {
+	return self.client.CreateICloudgroup(name, desc)
+}
+
+func (self *SKsyunProvider) GetICloudgroupByName(name string) (cloudprovider.ICloudgroup, error) {
+	return self.client.GetICloudgroupByName(name)
+}
+
+func (self *SKsyunProvider) GetICloudpolicies() ([]cloudprovider.ICloudpolicy, error) {
+	return self.client.GetICloudpolicies()
 }

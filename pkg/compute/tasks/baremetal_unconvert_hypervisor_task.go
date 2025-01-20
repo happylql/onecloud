@@ -38,7 +38,7 @@ func init() {
 
 func (self *BaremetalUnconvertHypervisorTask) OnInit(ctx context.Context, obj db.IStandaloneModel, body jsonutils.JSONObject) {
 	baremetal := obj.(*models.SHost)
-	baremetal.SetStatus(self.UserCred, api.BAREMETAL_CONVERTING, "")
+	baremetal.SetStatus(ctx, self.UserCred, api.BAREMETAL_CONVERTING, "")
 	guests, err := baremetal.GetGuests()
 	if err != nil {
 		self.SetStageFailed(ctx, jsonutils.NewString(errors.Wrapf(err, "baremetal.GetGuests").Error()))
@@ -61,8 +61,13 @@ func (self *BaremetalUnconvertHypervisorTask) OnInit(ctx context.Context, obj db
 
 func (self *BaremetalUnconvertHypervisorTask) OnGuestDeleteComplete(ctx context.Context, baremetal *models.SHost, body jsonutils.JSONObject) {
 	db.OpsLog.LogEvent(baremetal, db.ACT_UNCONVERT_COMPLETE, "", self.UserCred)
-	driver := baremetal.GetDriverWithDefault()
-	err := driver.FinishUnconvert(ctx, self.UserCred, baremetal)
+	logclient.AddActionLogWithContext(ctx, baremetal, logclient.ACT_UNCONVERT_COMPLETE, nil, self.UserCred, true)
+	driver, err := baremetal.GetHostDriver()
+	if err != nil {
+		self.SetStageFailed(ctx, jsonutils.NewString(errors.Wrapf(err, "GetHostDriver").Error()))
+		return
+	}
+	err = driver.FinishUnconvert(ctx, self.UserCred, baremetal)
 	if err != nil {
 		log.Errorf("Fail to exec finish_unconvert: %s", err.Error())
 	}
@@ -73,6 +78,7 @@ func (self *BaremetalUnconvertHypervisorTask) OnGuestDeleteComplete(ctx context.
 
 func (self *BaremetalUnconvertHypervisorTask) OnGuestDeleteCompleteFailed(ctx context.Context, baremetal *models.SHost, body jsonutils.JSONObject) {
 	db.OpsLog.LogEvent(baremetal, db.ACT_UNCONVERT_FAIL, body, self.UserCred)
+	logclient.AddActionLogWithContext(ctx, baremetal, logclient.ACT_UNCONVERT_COMPLETE, nil, self.UserCred, false)
 	self.SetStage("OnFailSyncstatusComplete", nil)
 	baremetal.StartSyncstatus(ctx, self.UserCred, self.GetTaskId())
 	logclient.AddActionLogWithStartable(self, baremetal, logclient.ACT_BM_UNCONVERT_HYPER, body, self.UserCred, false)

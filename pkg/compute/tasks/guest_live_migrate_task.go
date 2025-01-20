@@ -16,9 +16,11 @@ package tasks
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 
 	"yunion.io/x/jsonutils"
+	"yunion.io/x/log"
 	"yunion.io/x/pkg/errors"
 	"yunion.io/x/pkg/util/httputils"
 	"yunion.io/x/pkg/utils"
@@ -29,6 +31,7 @@ import (
 	"yunion.io/x/onecloud/pkg/cloudcommon/db/taskman"
 	"yunion.io/x/onecloud/pkg/cloudcommon/notifyclient"
 	"yunion.io/x/onecloud/pkg/compute/models"
+	"yunion.io/x/onecloud/pkg/util/cgrouputils/cpuset"
 	"yunion.io/x/onecloud/pkg/util/logclient"
 )
 
@@ -74,6 +77,10 @@ func (task *GuestMigrateTask) GetSchedParams() (*schedapi.ScheduleInput, error) 
 		preferHostId, _ := task.Params.GetString("prefer_host_id")
 		input.PreferHostId = preferHostId
 	}
+	if jsonutils.QueryBoolean(task.Params, "reset_cpu_numa_pin", false) {
+		input.ResetCpuNumaPin = true
+	}
+
 	if task.isLiveMigrate() {
 		input.LiveMigrate = true
 		skipCpuCheck := jsonutils.QueryBoolean(task.Params, "skip_cpu_check", false)
@@ -81,14 +88,25 @@ func (task *GuestMigrateTask) GetSchedParams() (*schedapi.ScheduleInput, error) 
 		input.SkipCpuCheck = skipCpuCheck
 		input.SkipKernelCheck = skipKernelCheck
 	}
-	return guest.GetSchedMigrateParams(task.GetUserCred(), input), nil
+	res := guest.GetSchedMigrateParams(task.GetUserCred(), input)
+
+	if devs, _ := guest.GetIsolatedDevices(); len(devs) > 0 {
+		preferNumaNodesSet := cpuset.NewBuilder()
+		for i := range devs {
+			if devs[i].NumaNode >= 0 {
+				preferNumaNodesSet.Add(int(devs[i].NumaNode))
+			}
+		}
+		res.PreferNumaNodes = preferNumaNodesSet.Result().ToSlice()
+	}
+	return res, nil
 }
 
 func (task *GuestMigrateTask) OnStartSchedule(obj IScheduleModel) {
 	guest := obj.(*models.SGuest)
 	guestStatus, _ := task.Params.GetString("guest_status")
 	if guestStatus != api.VM_RUNNING && guestStatus != api.VM_SUSPEND {
-		guest.SetStatus(task.UserCred, api.VM_MIGRATING, "")
+		guest.SetStatus(context.Background(), task.UserCred, api.VM_MIGRATING, "")
 	}
 
 	db.OpsLog.LogEvent(guest, db.ACT_MIGRATING, "", task.UserCred)
@@ -105,19 +123,27 @@ func (task *GuestMigrateTask) OnScheduleFailed(ctx context.Context, reason jsonu
 }
 
 func (task *GuestMigrateTask) SaveScheduleResult(ctx context.Context, obj IScheduleModel, target *schedapi.CandidateResource, index int) {
-	targetHostId := target.HostId
 	guest := obj.(*models.SGuest)
+	if jsonutils.QueryBoolean(task.Params, "reset_cpu_numa_pin", false) {
+		guest.SetCpuNumaPin(ctx, task.UserCred, target.CpuNumaPin, nil)
+		db.OpsLog.LogEvent(guest, db.ACT_RESET_CPU_NUMA_PIN, fmt.Sprintf("reset cpu numa pin %s", jsonutils.Marshal(target.CpuNumaPin)), task.UserCred)
+		task.SetStageComplete(ctx, nil)
+		return
+	}
+
+	targetHostId := target.HostId
 	targetHost := models.HostManager.FetchHostById(targetHostId)
 	if targetHost == nil {
 		task.TaskFailed(ctx, guest, jsonutils.NewString("target host not found?"))
 		return
 	}
-	db.OpsLog.LogEvent(guest, db.ACT_MIGRATING, fmt.Sprintf("guest start migrate from host %s to %s", guest.HostId, targetHostId), task.UserCred)
-	logclient.AddActionLogWithContext(ctx, guest, logclient.ACT_MIGRATING,
-		fmt.Sprintf("guest start migrate from host %s to %s(%s)", guest.HostId, targetHostId, targetHost.GetName()), task.UserCred, true)
 
 	body := jsonutils.NewDict()
 	body.Set("target_host_id", jsonutils.NewString(targetHostId))
+	if len(target.CpuNumaPin) > 0 {
+		body.Set("target_cpu_numa_pin", jsonutils.Marshal(target.CpuNumaPin))
+	}
+
 	// for params notes
 	body.Set("target_host_name", jsonutils.NewString(targetHost.Name))
 	srcHost := models.HostManager.FetchHostById(guest.HostId)
@@ -146,26 +172,97 @@ func (task *GuestMigrateTask) SaveScheduleResult(ctx context.Context, obj ISched
 		body.Set("is_local_storage", jsonutils.JSONFalse)
 	}
 
-	task.SetStage("OnCachedImageComplete", body)
 	// prepare disk for migration
 	if len(disk.TemplateId) > 0 && isLocalStorage {
-		targetStorageCache := targetHost.GetLocalStoragecache()
-		if targetStorageCache != nil {
-			input := api.CacheImageInput{
-				ImageId:      disk.TemplateId,
-				Format:       disk.DiskFormat,
-				IsForce:      false,
-				SourceHostId: guest.HostId,
-				ParentTaskId: task.GetTaskId(),
+		templates := []string{}
+		if sourceGuestId := guest.GetMetadata(ctx, api.SERVER_META_CONVERT_FROM_ESXI, task.UserCred); len(sourceGuestId) > 0 {
+			// skip cache images
+		} else if sourceGuestId := guest.GetMetadata(ctx, api.SERVER_META_CONVERT_FROM_CLOUDPODS, task.UserCred); len(sourceGuestId) > 0 {
+			// skip cache images
+		} else {
+			guestdisks, _ := guest.GetDisks()
+			for i := range guestdisks {
+				if guestdisks[i].TemplateId != "" {
+					templates = append(templates, guestdisks[i].TemplateId)
+				}
 			}
-			err := targetStorageCache.StartImageCacheTask(ctx, task.UserCred, input)
-			if err != nil {
-				task.TaskFailed(ctx, guest, jsonutils.NewString(err.Error()))
-			}
-			return
+		}
+
+		if len(templates) > 0 {
+			body.Set("cache_templates", jsonutils.NewStringArray(templates))
 		}
 	}
-	task.OnCachedImageComplete(ctx, guest, nil)
+
+	db.OpsLog.LogEvent(guest, db.ACT_MIGRATING, fmt.Sprintf("guest start migrate from host %s to %s", guest.HostId, targetHostId), task.UserCred)
+	logclient.AddActionLogWithContext(ctx, guest, logclient.ACT_MIGRATING,
+		fmt.Sprintf("guest start migrate from host %s to %s(%s)", guest.HostId, targetHostId, targetHost.GetName()), task.UserCred, true)
+
+	task.SetStage("OnStartCacheImages", body)
+	task.OnStartCacheImages(ctx, guest, nil)
+}
+
+func (task *GuestMigrateTask) tryRecoverImageCache(ctx context.Context, guest *models.SGuest, input *api.CacheImageInput) error {
+	if _, err := models.CachedimageManager.FetchById(input.ImageId); err != nil {
+		if err != sql.ErrNoRows {
+			return err
+		}
+		if _, err := models.CachedimageManager.RecoverCachedImage(ctx, task.UserCred, input.ImageId); err != nil {
+			log.Errorf("failed recache image %s: %s", input.ImageId, err)
+		}
+
+		srcHost, err := guest.GetHost()
+		if err != nil {
+			return err
+		}
+		srcStorageCache := srcHost.GetLocalStoragecache()
+		if scImg := models.StoragecachedimageManager.GetStoragecachedimage(srcStorageCache.Id, input.ImageId); scImg == nil {
+			_, err = models.StoragecachedimageManager.RecoverStoragecachedImage(ctx, task.UserCred, srcStorageCache.Id, input.ImageId)
+			if err != nil {
+				log.Errorf("failed RecoverStoragecachedImage %s:%s %s", srcStorageCache.Id, input.ImageId, err)
+			}
+		}
+	}
+	return nil
+}
+
+func (task *GuestMigrateTask) OnStartCacheImages(ctx context.Context, guest *models.SGuest, data jsonutils.JSONObject) {
+	templates, _ := task.Params.GetArray("cache_templates")
+	if len(templates) == 0 {
+		task.OnCachedImageComplete(ctx, guest, nil)
+		return
+	}
+
+	templateId, _ := templates[0].GetString()
+	task.Params.Set("cache_templates", jsonutils.NewArray(templates[1:]...))
+	task.SetStage("OnStartCacheImages", nil)
+
+	targetHostId, _ := task.Params.GetString("target_host_id")
+	targetHost := models.HostManager.FetchHostById(targetHostId)
+	targetStorageCache := targetHost.GetLocalStoragecache()
+	if targetStorageCache != nil {
+		input := api.CacheImageInput{
+			ImageId:      templateId,
+			IsForce:      false,
+			SourceHostId: guest.HostId,
+			ParentTaskId: task.GetTaskId(),
+		}
+		if err := task.tryRecoverImageCache(ctx, guest, &input); err != nil {
+			task.TaskFailed(ctx, guest, jsonutils.NewString(err.Error()))
+			return
+		}
+
+		err := targetStorageCache.StartImageCacheTask(ctx, task.UserCred, input)
+		if err != nil {
+			task.TaskFailed(ctx, guest, jsonutils.NewString(err.Error()))
+			return
+		}
+	} else {
+		task.OnStartCacheImages(ctx, guest, nil)
+	}
+}
+
+func (task *GuestMigrateTask) OnStartCacheImagesFailed(ctx context.Context, guest *models.SGuest, data jsonutils.JSONObject) {
+	task.TaskFailed(ctx, guest, data)
 }
 
 // For local storage get disk info
@@ -182,15 +279,21 @@ func (task *GuestMigrateTask) OnCachedImageComplete(ctx context.Context, guest *
 				Format:       "iso",
 				IsForce:      false,
 				ParentTaskId: task.GetTaskId(),
+				SourceHostId: guest.HostId,
+			}
+			if err := task.tryRecoverImageCache(ctx, guest, &input); err != nil {
+				task.TaskFailed(ctx, guest, jsonutils.NewString(err.Error()))
+				return
 			}
 			err := targetStorageCache.StartImageCacheTask(ctx, task.UserCred, input)
 			if err != nil {
 				task.TaskFailed(ctx, guest, jsonutils.NewString(err.Error()))
+				return
 			}
-			return
 		}
+	} else {
+		task.OnCachedCdromComplete(ctx, guest, nil)
 	}
-	task.OnCachedCdromComplete(ctx, guest, nil)
 }
 
 func (task *GuestMigrateTask) OnCachedCdromComplete(ctx context.Context, guest *models.SGuest, data jsonutils.JSONObject) {
@@ -238,6 +341,11 @@ func (task *GuestMigrateTask) OnSrcPrepareComplete(ctx context.Context, guest *m
 	} else {
 		body, err = task.sharedStorageMigrateConf(ctx, guest, targetHost)
 	}
+	if err != nil {
+		task.TaskFailed(ctx, guest, jsonutils.NewString(errors.Wrap(err, "get storage migrate conf").Error()))
+		return
+	}
+
 	if task.isLiveMigrate() {
 		srcDesc, err := data.Get("src_desc")
 		if err != nil {
@@ -311,7 +419,7 @@ func (task *GuestMigrateTask) OnNormalMigrateComplete(ctx context.Context, guest
 	oldHostId := guest.HostId
 	task.setGuest(ctx, guest)
 	guestStatus, _ := task.Params.GetString("guest_status")
-	guest.SetStatus(task.UserCred, guestStatus, "")
+	guest.SetStatus(ctx, task.UserCred, guestStatus, "")
 	if task.isRescueMode() {
 		guest.StartGueststartTask(ctx, task.UserCred, nil, "")
 		task.TaskComplete(ctx, guest)
@@ -398,6 +506,12 @@ func (task *GuestMigrateTask) sharedStorageMigrateConf(ctx context.Context, gues
 	body.Set("is_local_storage", jsonutils.JSONFalse)
 	body.Set("qemu_version", jsonutils.NewString(guest.GetQemuVersion(task.UserCred)))
 	targetDesc := guest.GetJsonDescAtHypervisor(ctx, targetHost)
+	if task.Params.Contains("target_cpu_numa_pin") {
+		if err := task.setCpuNumaPin(targetDesc); err != nil {
+			return nil, errors.Wrap(err, "setCpuNumaPin")
+		}
+	}
+
 	body.Set("desc", jsonutils.Marshal(targetDesc))
 
 	sourceHost, _ := guest.GetHost()
@@ -452,6 +566,12 @@ func (task *GuestMigrateTask) localStorageMigrateConf(ctx context.Context,
 	if len(targetDesc.Disks) == 0 {
 		return nil, errors.Errorf("Get disksDesc error")
 	}
+	if task.Params.Contains("target_cpu_numa_pin") {
+		if err := task.setCpuNumaPin(targetDesc); err != nil {
+			return nil, errors.Wrap(err, "setCpuNumaPin")
+		}
+	}
+
 	targetStorages, _ := task.Params.GetArray("target_storages")
 	for i := 0; i < len(disks); i++ {
 		targetStorageId, err := targetStorages[i].GetString()
@@ -465,6 +585,20 @@ func (task *GuestMigrateTask) localStorageMigrateConf(ctx context.Context,
 	body.Set("rebase_disks", jsonutils.JSONTrue)
 	body.Set("is_local_storage", jsonutils.JSONTrue)
 	return body, nil
+}
+
+func (task *GuestMigrateTask) setCpuNumaPin(targetDesc *api.GuestJsonDesc) error {
+	cpuNumaPin := make([]schedapi.SCpuNumaPin, 0)
+	if err := task.Params.Unmarshal(&cpuNumaPin, "cpu_numa_pin"); err != nil {
+		return errors.Wrap(err, "unmarshal cpu_numa_pin")
+	}
+	for i := range targetDesc.CpuNumaPin {
+		for j := range targetDesc.CpuNumaPin[i].VcpuPin {
+			targetDesc.CpuNumaPin[i].VcpuPin[j].Pcpu = cpuNumaPin[i].CpuPin[j]
+		}
+	}
+	task.Params.Set("target_vcpu_numa_pin", jsonutils.Marshal(targetDesc.CpuNumaPin))
+	return nil
 }
 
 func (task *GuestLiveMigrateTask) OnStartDestComplete(ctx context.Context, guest *models.SGuest, data jsonutils.JSONObject) {
@@ -502,7 +636,7 @@ func (task *GuestLiveMigrateTask) OnStartDestComplete(ctx context.Context, guest
 	host, _ := guest.GetHost()
 	url := fmt.Sprintf("%s/servers/%s/live-migrate", host.ManagerUri, guest.Id)
 	task.SetStage("OnLiveMigrateComplete", nil)
-	guest.SetStatus(task.UserCred, api.VM_LIVE_MIGRATING, "")
+	guest.SetStatus(ctx, task.UserCred, api.VM_LIVE_MIGRATING, "")
 	_, _, err = httputils.JSONRequest(httputils.GetDefaultClient(),
 		ctx, "POST", url, headers, body, false)
 	if err != nil {
@@ -539,6 +673,29 @@ func (task *GuestMigrateTask) setGuest(ctx context.Context, guest *models.SGuest
 			}
 		}
 	}
+
+	if task.Params.Contains("target_cpu_numa_pin") {
+		var cpuNumaPinSrc []schedapi.SCpuNumaPin = nil
+		var cpuNumaPin []api.SCpuNumaPin = nil
+
+		val, _ := task.Params.Get("target_cpu_numa_pin")
+		if !val.Equals(jsonutils.JSONNull) {
+			cpuNumaPinSrc = make([]schedapi.SCpuNumaPin, 0)
+			if err := task.Params.Unmarshal(&cpuNumaPinSrc, "target_cpu_numa_pin"); err != nil {
+				return errors.Wrap(err, "unmarshal target_cpu_numa_pin")
+			}
+
+			cpuNumaPin = make([]api.SCpuNumaPin, 0)
+			if err := task.Params.Unmarshal(&cpuNumaPin, "target_vcpu_numa_pin"); err != nil {
+				return errors.Wrap(err, "unmarshal target_vcpu_numa_pin")
+			}
+		}
+
+		if err := guest.SetCpuNumaPin(ctx, task.UserCred, cpuNumaPinSrc, cpuNumaPin); err != nil {
+			return errors.Wrap(err, "SetCpuNumaPin")
+		}
+	}
+
 	oldHost, _ := guest.GetHost()
 	oldHost.ClearSchedDescCache()
 	err := guest.OnScheduleToHost(ctx, task.UserCred, targetHostId)
@@ -701,7 +858,7 @@ func (task *GuestMigrateTask) TaskFailed(ctx context.Context, guest *models.SGue
 }
 
 func (task *GuestMigrateTask) markFailed(ctx context.Context, guest *models.SGuest, reason jsonutils.JSONObject) {
-	guest.SetStatus(task.UserCred, api.VM_MIGRATE_FAILED, reason.String())
+	guest.SetStatus(ctx, task.UserCred, api.VM_MIGRATE_FAILED, reason.String())
 	db.OpsLog.LogEvent(guest, db.ACT_MIGRATE_FAIL, reason, task.UserCred)
 	logclient.AddActionLogWithContext(ctx, guest, logclient.ACT_MIGRATE, reason, task.UserCred, false)
 	notifyclient.NotifySystemErrorWithCtx(ctx, guest.Id, guest.Name, api.VM_MIGRATE_FAILED, reason.String())
@@ -721,10 +878,15 @@ func (task *ManagedGuestMigrateTask) OnInit(ctx context.Context, obj db.IStandal
 
 func (task *ManagedGuestMigrateTask) MigrateStart(ctx context.Context, guest *models.SGuest, data jsonutils.JSONObject) {
 	task.SetStage("OnMigrateComplete", nil)
-	guest.SetStatus(task.UserCred, api.VM_MIGRATING, "")
+	guest.SetStatus(ctx, task.UserCred, api.VM_MIGRATING, "")
 	input := api.GuestMigrateInput{}
 	task.GetParams().Unmarshal(&input)
-	if err := guest.GetDriver().RequestMigrate(ctx, guest, task.UserCred, input, task); err != nil {
+	drv, err := guest.GetDriver()
+	if err != nil {
+		task.OnMigrateCompleteFailed(ctx, guest, jsonutils.NewString(err.Error()))
+		return
+	}
+	if err := drv.RequestMigrate(ctx, guest, task.UserCred, input, task); err != nil {
 		task.OnMigrateCompleteFailed(ctx, guest, jsonutils.NewString(err.Error()))
 	}
 }
@@ -759,7 +921,7 @@ func (task *ManagedGuestMigrateTask) OnGuestStartSuccFailed(ctx context.Context,
 }
 
 func (task *ManagedGuestMigrateTask) OnMigrateCompleteFailed(ctx context.Context, guest *models.SGuest, data jsonutils.JSONObject) {
-	guest.SetStatus(task.UserCred, api.VM_MIGRATE_FAILED, "")
+	guest.SetStatus(ctx, task.UserCred, api.VM_MIGRATE_FAILED, "")
 	db.OpsLog.LogEvent(guest, db.ACT_MIGRATE_FAIL, data, task.UserCred)
 	logclient.AddActionLogWithContext(ctx, guest, logclient.ACT_MIGRATE, data, task.UserCred, false)
 	task.SetStageFailed(ctx, data)
@@ -775,10 +937,15 @@ func (task *ManagedGuestLiveMigrateTask) OnInit(ctx context.Context, obj db.ISta
 
 func (task *ManagedGuestLiveMigrateTask) MigrateStart(ctx context.Context, guest *models.SGuest, data jsonutils.JSONObject) {
 	task.SetStage("OnMigrateComplete", nil)
-	guest.SetStatus(task.UserCred, api.VM_MIGRATING, "")
+	guest.SetStatus(ctx, task.UserCred, api.VM_MIGRATING, "")
 	input := api.GuestLiveMigrateInput{}
 	task.GetParams().Unmarshal(&input)
-	if err := guest.GetDriver().RequestLiveMigrate(ctx, guest, task.UserCred, input, task); err != nil {
+	drv, err := guest.GetDriver()
+	if err != nil {
+		task.OnMigrateCompleteFailed(ctx, guest, jsonutils.NewString(err.Error()))
+		return
+	}
+	if err := drv.RequestLiveMigrate(ctx, guest, task.UserCred, input, task); err != nil {
 		task.OnMigrateCompleteFailed(ctx, guest, jsonutils.NewString(err.Error()))
 	}
 }
@@ -799,7 +966,7 @@ func (task *ManagedGuestLiveMigrateTask) OnGuestSyncStatusFailed(ctx context.Con
 }
 
 func (task *ManagedGuestLiveMigrateTask) OnMigrateCompleteFailed(ctx context.Context, guest *models.SGuest, data jsonutils.JSONObject) {
-	guest.SetStatus(task.UserCred, api.VM_MIGRATE_FAILED, "")
+	guest.SetStatus(ctx, task.UserCred, api.VM_MIGRATE_FAILED, "")
 	db.OpsLog.LogEvent(guest, db.ACT_MIGRATE_FAIL, data, task.UserCred)
 	logclient.AddActionLogWithContext(ctx, guest, logclient.ACT_MIGRATE, data, task.UserCred, false)
 	task.SetStageFailed(ctx, data)

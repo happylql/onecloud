@@ -67,6 +67,13 @@ func (self *SInstance) Refresh() error {
 	if err != nil {
 		return err
 	}
+	self.DisksInfo = nil
+	self.Nics = nil
+	self.Secgroups = nil
+	self.SubIPs = nil
+	self.IsolatedDevices = nil
+	self.Cdrom = nil
+	self.Floppy = nil
 	return jsonutils.Update(self, ins)
 }
 
@@ -205,7 +212,7 @@ func (self *SInstance) SetSecurityGroups(ids []string) error {
 }
 
 func (self *SInstance) GetHypervisor() string {
-	return api.HYPERVISOR_CLOUDPODS
+	return self.Hypervisor
 }
 
 func (self *SInstance) StartVM(ctx context.Context) error {
@@ -272,22 +279,27 @@ func (self *SInstance) RebuildRoot(ctx context.Context, opts *cloudprovider.SMan
 	return self.DisksInfo[0].Id, nil
 }
 
-func (self *SInstance) DeployVM(ctx context.Context, name string, username string, password string, publicKey string, deleteKeypair bool, description string) error {
+func (self *SInstance) DeployVM(ctx context.Context, opts *cloudprovider.SInstanceDeployOptions) error {
 	input := api.ServerDeployInput{}
-	input.Password = password
-	if len(publicKey) > 0 {
-		keypairId, err := self.host.zone.region.syncKeypair(name, publicKey)
+	input.Password = opts.Password
+	input.DeleteKeypair = opts.DeleteKeypair
+	if len(opts.PublicKey) > 0 {
+		keypairId, err := self.host.zone.region.syncKeypair(self.Name, opts.PublicKey)
 		if err != nil {
 			return errors.Wrapf(err, "syncKeypair")
 		}
 		input.KeypairId = keypairId
 	}
-
+	cloudprovider.WaitMultiStatus(self, []string{api.VM_READY, api.VM_RUNNING}, time.Second*5, time.Minute*3)
 	_, err := self.host.zone.region.perform(&modules.Servers, self.Id, "deploy", input)
 	if err != nil {
 		return errors.Wrapf(err, "deploy")
 	}
-	return cloudprovider.WaitMultiStatus(self, []string{api.VM_READY, api.VM_RUNNING}, time.Second*5, time.Minute*3)
+	timeout := time.Minute * 3
+	if self.Hypervisor == api.HYPERVISOR_BAREMETAL {
+		timeout = time.Minute * 10
+	}
+	return cloudprovider.WaitMultiStatus(self, []string{api.VM_READY, api.VM_RUNNING}, time.Second*5, timeout)
 }
 
 func (self *SInstance) ChangeConfig(ctx context.Context, opts *cloudprovider.SManagedVMChangeConfig) error {
@@ -313,7 +325,7 @@ func (self *SRegion) GetInstanceVnc(id, name string) (*cloudprovider.ServerVncOu
 		Protocol:     "cloudpods",
 		InstanceId:   id,
 		InstanceName: name,
-		Hypervisor:   api.HYPERVISOR_CLOUDPODS,
+		Hypervisor:   api.HYPERVISOR_DEFAULT,
 	}
 	err = resp.Unmarshal(&result)
 	if err != nil {
@@ -345,6 +357,7 @@ func (self *SInstance) DetachDisk(ctx context.Context, diskId string) error {
 func (self *SInstance) MigrateVM(hostId string) error {
 	input := api.GuestMigrateInput{}
 	input.PreferHost = hostId
+	input.PreferHostId = hostId
 	_, err := self.host.zone.region.perform(&modules.Servers, self.Id, "migrate", input)
 	return err
 }
@@ -352,8 +365,10 @@ func (self *SInstance) MigrateVM(hostId string) error {
 func (self *SInstance) LiveMigrateVM(hostId string) error {
 	input := api.GuestLiveMigrateInput{}
 	input.PreferHost = hostId
-	skipCpuCheck := true
-	input.SkipCpuCheck = &skipCpuCheck
+	input.PreferHostId = hostId
+	skipCheck := true
+	input.SkipCpuCheck = &skipCheck
+	input.SkipKernelCheck = &skipCheck
 	_, err := self.host.zone.region.perform(&modules.Servers, self.Id, "live-migrate", input)
 	return err
 }
@@ -474,6 +489,7 @@ func (self *SRegion) GetInstances(hostId string) ([]SInstance, error) {
 	if len(hostId) > 0 {
 		params["host_id"] = hostId
 	}
+	params["filter"] = fmt.Sprintf("hypervisor.in('kvm', 'baremetal')")
 	ret := []SInstance{}
 	return ret, self.list(&modules.Servers, params, &ret)
 }
@@ -482,13 +498,17 @@ func (self *SRegion) CreateInstance(hostId, hypervisor string, opts *cloudprovid
 	input := api.ServerCreateInput{
 		ServerConfigs: &api.ServerConfigs{},
 	}
-	input.Name = opts.Name
+	input.GenerateName = opts.Name
 	input.Hostname = opts.Hostname
 	input.Description = opts.Description
 	input.InstanceType = opts.InstanceType
 	input.VcpuCount = opts.Cpu
 	input.VmemSize = opts.MemoryMB
 	input.Password = opts.Password
+	if len(input.Password) == 0 {
+		resetPasswd := false
+		input.ResetPassword = &resetPasswd
+	}
 	input.PublicIpBw = opts.PublicIpBw
 	input.PublicIpChargeType = string(opts.PublicIpChargeType)
 	input.ProjectId = opts.ProjectId
@@ -503,9 +523,18 @@ func (self *SRegion) CreateInstance(hostId, hypervisor string, opts *cloudprovid
 	if opts.BillingCycle != nil {
 		input.Duration = opts.BillingCycle.String()
 	}
+	image, err := self.GetImage(opts.ExternalImageId)
+	if err != nil {
+		return nil, errors.Wrapf(err, "GetImage")
+	}
+	imageId := opts.ExternalImageId
+	if image.DiskFormat == "iso" {
+		input.Cdrom = opts.ExternalImageId
+		imageId = ""
+	}
 	input.Disks = append(input.Disks, &api.DiskConfig{
 		Index:    0,
-		ImageId:  opts.ExternalImageId,
+		ImageId:  imageId,
 		DiskType: api.DISK_TYPE_SYS,
 		SizeMb:   opts.SysDisk.SizeGB * 1024,
 		Backend:  opts.SysDisk.StorageType,
@@ -536,7 +565,7 @@ type SMetricData struct {
 }
 
 func (cli *SCloudpodsClient) GetMetrics(opts *cloudprovider.MetricListOptions) ([]cloudprovider.MetricValues, error) {
-	brandArr := []string{"OneCloud", "VMware"}
+	brandArr := []string{"OneCloud"}
 	metrics := []SMetricData{}
 	usefulResourceType := []cloudprovider.TResourceType{cloudprovider.METRIC_RESOURCE_TYPE_HOST, cloudprovider.METRIC_RESOURCE_TYPE_SERVER}
 	isUse, _ := utils.InArray(opts.ResourceType, usefulResourceType)
@@ -583,4 +612,43 @@ func (cli *SCloudpodsClient) GetMetrics(opts *cloudprovider.MetricListOptions) (
 		})
 	}
 	return res, nil
+}
+
+func (self *SInstance) CreateDisk(ctx context.Context, opts *cloudprovider.GuestDiskCreateOptions) (string, error) {
+	diskIds := []string{}
+	for _, disk := range self.DisksInfo {
+		diskIds = append(diskIds, disk.Id)
+	}
+	input := jsonutils.Marshal(map[string]interface{}{
+		"disks": []map[string]interface{}{
+			{
+				"size":          opts.SizeMb,
+				"storage_id":    opts.StorageId,
+				"preallocation": opts.Preallocation,
+			},
+		},
+	})
+	_, err := self.host.zone.region.perform(&modules.Servers, self.Id, "createdisk", input)
+	if err != nil {
+		return "", err
+	}
+	ret := ""
+	cloudprovider.Wait(time.Second*3, time.Minute*3, func() (bool, error) {
+		err = self.Refresh()
+		if err != nil {
+			return false, errors.Wrapf(err, "Refresh")
+		}
+
+		for _, disk := range self.DisksInfo {
+			if !utils.IsInStringArray(disk.Id, diskIds) {
+				ret = disk.Id
+				return true, nil
+			}
+		}
+		return false, nil
+	})
+	if len(ret) > 0 {
+		return ret, nil
+	}
+	return "", errors.Wrapf(cloudprovider.ErrNotFound, "after disk created")
 }

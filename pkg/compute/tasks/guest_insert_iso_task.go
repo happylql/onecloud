@@ -24,6 +24,7 @@ import (
 	"yunion.io/x/onecloud/pkg/cloudcommon/db"
 	"yunion.io/x/onecloud/pkg/cloudcommon/db/taskman"
 	"yunion.io/x/onecloud/pkg/compute/models"
+	"yunion.io/x/onecloud/pkg/util/logclient"
 )
 
 type GuestInsertIsoTask struct {
@@ -56,11 +57,13 @@ func (self *GuestInsertIsoTask) prepareIsoImage(ctx context.Context, obj db.ISta
 			ImageId:      imageId,
 			Format:       "iso",
 			ParentTaskId: self.GetTaskId(),
+			ServerId:     guest.Id,
 		}
 		storageCache.StartImageCacheTask(ctx, self.UserCred, input)
 	} else {
 		guest.EjectIso(cdromOrdinal, self.UserCred)
 		db.OpsLog.LogEvent(obj, db.ACT_ISO_PREPARE_FAIL, imageId, self.UserCred)
+		logclient.AddActionLogWithContext(ctx, guest, logclient.ACT_ISO_ATTACH, nil, self.UserCred, false)
 		self.SetStageFailed(ctx, jsonutils.NewString("host no local storage cache"))
 	}
 }
@@ -71,6 +74,7 @@ func (self *GuestInsertIsoTask) OnIsoPrepareCompleteFailed(ctx context.Context, 
 	db.OpsLog.LogEvent(obj, db.ACT_ISO_PREPARE_FAIL, imageId, self.UserCred)
 	guest := obj.(*models.SGuest)
 	guest.EjectIso(cdromOrdinal, self.UserCred)
+	logclient.AddActionLogWithContext(ctx, guest, logclient.ACT_ISO_ATTACH, nil, self.UserCred, false)
 	self.SetStageFailed(ctx, data)
 }
 
@@ -94,10 +98,16 @@ func (self *GuestInsertIsoTask) OnIsoPrepareComplete(ctx context.Context, obj db
 	guest := obj.(*models.SGuest)
 	if cdrom, ok := guest.InsertIsoSucc(cdromOrdinal, imageId, path, size, name, bootIndex); ok {
 		db.OpsLog.LogEvent(guest, db.ACT_ISO_ATTACH, cdrom.GetDetails(), self.UserCred)
-		if guest.GetDriver().NeedRequestGuestHotAddIso(ctx, guest) {
+		logclient.AddActionLogWithContext(ctx, guest, logclient.ACT_ISO_ATTACH, cdrom.GetDetails(), self.UserCred, true)
+		drv, err := guest.GetDriver()
+		if err != nil {
+			self.OnIsoPrepareCompleteFailed(ctx, guest, jsonutils.NewString(err.Error()))
+			return
+		}
+		if drv.NeedRequestGuestHotAddIso(ctx, guest) {
 			self.SetStage("OnConfigSyncComplete", nil)
 			boot := jsonutils.QueryBoolean(self.Params, "boot", false)
-			guest.GetDriver().RequestGuestHotAddIso(ctx, guest, path, boot, self)
+			drv.RequestGuestHotAddIso(ctx, guest, path, boot, self)
 		} else {
 			self.SetStageComplete(ctx, nil)
 		}

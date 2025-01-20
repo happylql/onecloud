@@ -86,7 +86,7 @@ type DBInstanceCreateInput struct {
 	ExpiredAt time.Time `json:"expired_at"`
 
 	// 计费方式
-	// enum: postpaid, prepaid
+	// enum: ["postpaid", "prepaid"]
 	BillingType string
 	// swagger:ignore
 	BillingCycle string
@@ -96,7 +96,7 @@ type DBInstanceCreateInput struct {
 	InstanceType string `json:"instance_type"`
 
 	// rds引擎
-	// enum: MySQL, SQLServer, PostgreSQL, MariaDB, Oracle, PPAS
+	// enum: ["MySQL", "SQLServer", "PostgreSQL", "MariaDB", "Oracle", "PPAS"]
 	// required: true
 	Engine string `json:"engine"`
 
@@ -221,6 +221,9 @@ type DBInstanceListInput struct {
 
 	// 通过IP搜索RDS实例
 	IpAddr []string `json:"ip_addr"`
+
+	// 通过安全组Id过滤RDS实例
+	SecgroupId string `json:"secgroup_id"`
 }
 
 type DBInstanceBackupListInput struct {

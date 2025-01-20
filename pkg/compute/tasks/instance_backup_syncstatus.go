@@ -54,7 +54,7 @@ func (self *InstanceBackupSyncstatusTask) OnInit(ctx context.Context, obj db.ISt
 }
 
 func (self *InstanceBackupSyncstatusTask) OnKvmBackupSyncstatus(ctx context.Context, ib *models.SInstanceBackup, data jsonutils.JSONObject) {
-	subTasks := taskman.SubTaskManager.GetTotalSubtasks(self.Id, "OnKvmDisksSnapshot", "")
+	subTasks := taskman.SubTaskManager.GetSubtasks(self.Id, "OnKvmDisksSnapshot", "")
 	for i := range subTasks {
 		log.Infof("subsTask %s result: %s", subTasks[i].SubtaskId, subTasks[i].Result)
 		result, err := jsonutils.ParseString(subTasks[i].Result)
@@ -86,9 +86,9 @@ func (self *InstanceBackupSyncstatusTask) OnKvmBackupSyncstatus(ctx context.Cont
 	}
 	if status == "" {
 		originStatus, _ := self.Params.GetString("origin_status")
-		ib.SetStatus(self.GetUserCred(), originStatus, "")
+		ib.SetStatus(ctx, self.GetUserCred(), originStatus, "")
 	} else {
-		ib.SetStatus(self.GetUserCred(), status, "")
+		ib.SetStatus(ctx, self.GetUserCred(), status, "")
 	}
 	self.OnInstnaceBackupSyncstatus(ctx, ib, data)
 	return

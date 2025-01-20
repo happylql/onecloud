@@ -17,7 +17,6 @@ package ctyun
 import (
 	"context"
 	"fmt"
-	"strconv"
 	"strings"
 	"time"
 
@@ -41,7 +40,7 @@ type SInstance struct {
 	image *SImage
 
 	AzName         string
-	ExpiredTime    string
+	ExpiredTime    time.Time
 	CreatedTime    time.Time
 	ProjectId      string
 	AttachedVolume []string
@@ -96,7 +95,7 @@ type SInstance struct {
 }
 
 func (self *SInstance) GetBillingType() string {
-	if len(self.ExpiredTime) > 0 {
+	if !self.OnDemand {
 		return billing_api.BILLING_TYPE_PREPAID
 	}
 	return billing_api.BILLING_TYPE_POSTPAID
@@ -107,11 +106,7 @@ func (self *SInstance) GetCreatedAt() time.Time {
 }
 
 func (self *SInstance) GetExpiredAt() time.Time {
-	if len(self.ExpiredTime) > 0 {
-		expire, _ := strconv.Atoi(self.ExpiredTime)
-		return time.Unix(int64(expire/1000), 0)
-	}
-	return time.Time{}
+	return self.ExpiredTime
 }
 
 func (self *SInstance) GetId() string {
@@ -439,18 +434,18 @@ func (self *SRegion) DetachKeypair(vmId, keyName string) error {
 	return err
 }
 
-func (self *SInstance) DeployVM(ctx context.Context, name string, username string, password string, publicKey string, deleteKeypair bool, description string) error {
-	if len(password) > 0 {
-		return self.host.zone.region.ResetVMPassword(self.GetId(), password)
+func (self *SInstance) DeployVM(ctx context.Context, opts *cloudprovider.SInstanceDeployOptions) error {
+	if len(opts.Password) > 0 {
+		return self.host.zone.region.ResetVMPassword(self.GetId(), opts.Password)
 	}
-	if len(publicKey) > 0 {
-		keypair, err := self.host.zone.region.syncKeypair(publicKey)
+	if len(opts.PublicKey) > 0 {
+		keypair, err := self.host.zone.region.syncKeypair(opts.Password)
 		if err != nil {
 			return errors.Wrapf(err, "syncKeypair")
 		}
 		return self.host.zone.region.AttachKeypair(self.InstanceId, keypair.KeyPairName)
 	}
-	if deleteKeypair && len(self.KeypairName) > 0 {
+	if opts.DeleteKeypair && len(self.KeypairName) > 0 {
 		return self.host.zone.region.DetachKeypair(self.InstanceId, self.KeypairName)
 	}
 	return nil

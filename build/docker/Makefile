@@ -15,7 +15,7 @@ onecloud-base:
 onecloud-base-3-15-4:
 	$(DOCKER_BUILDX)/onecloud-base:$(ONECLOUD_BASE_VERSION_3-15-4) -f ./Dockerfile.onecloud-base-3-15-4 .
 
-ANSIBLESERVER_BASE = v1.1.1
+ANSIBLESERVER_BASE = v1.1.2
 
 ansibleserver-base:
 	$(DOCKER_BUILDX)/ansibleserver-base:$(ANSIBLESERVER_BASE) -f ./Dockerfile.ansibleserver-base .
@@ -26,11 +26,16 @@ climc-base:
 	docker buildx build --platform linux/arm64,linux/amd64 --push \
 		-t registry.cn-beijing.aliyuncs.com/yunionio/climc-base:$(CLIMC_BASE_VERSION) -f ./Dockerfile.climc-base .
 
-WEBCONSOLE_BASE_VERSION = 20230731.2
+KUBECTL_VERSION = 1.22.9
+kubectl:
+	docker buildx build --platform linux/arm64,linux/amd64 --push \
+		-t registry.cn-beijing.aliyuncs.com/yunionio/kubectl:$(KUBECTL_VERSION) -f ./Dockerfile.kubectl .
+
+WEBCONSOLE_BASE_VERSION = 20240909.0
 webconsole-base:
 	$(DOCKER_BUILDX)/webconsole-base:$(WEBCONSOLE_BASE_VERSION) -f ./Dockerfile.webconsole-base .
 
-BAREMETAL_BASE_VERSION = v0.3.9-20230812.0
+BAREMETAL_BASE_VERSION = v0.3.9-20231219.1
 
 baremetal-base:
 	$(DOCKER_BUILDX)/baremetal-base:$(BAREMETAL_BASE_VERSION) -f ./Dockerfile.baremetal-base .
@@ -44,7 +49,7 @@ GLANCE_BASE_VERSION = v0.0.1
 glance-base:
 	$(DOCKER_BUILDX)/glance-base:$(GLANCE_BASE_VERSION) -f ./Dockerfile.glance-base .
 
-FILE_REPO_VERSION = v0.3.3
+FILE_REPO_VERSION = v0.5.2
 
 file-repo:
 	$(DOCKER_BUILDX)/file-repo:$(FILE_REPO_VERSION) -f ./Dockerfile.file-repo .

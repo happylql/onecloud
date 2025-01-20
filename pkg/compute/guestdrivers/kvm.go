@@ -16,6 +16,7 @@ package guestdrivers
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -27,6 +28,7 @@ import (
 	"yunion.io/x/log"
 	"yunion.io/x/pkg/errors"
 	"yunion.io/x/pkg/util/httputils"
+	"yunion.io/x/pkg/util/netutils"
 	"yunion.io/x/pkg/util/rbacscope"
 	"yunion.io/x/pkg/utils"
 	"yunion.io/x/sqlchemy"
@@ -131,13 +133,29 @@ func (self *SKVMGuestDriver) DoGuestCreateDisksTask(ctx context.Context, guest *
 }
 
 func (self *SKVMGuestDriver) RequestDiskSnapshot(ctx context.Context, guest *models.SGuest, task taskman.ITask, snapshotId, diskId string) error {
+	obj, err := models.SnapshotManager.FetchById(snapshotId)
+	if err != nil {
+		return errors.Wrapf(err, "failed to find snapshot %s", snapshotId)
+	}
+	snapshot := obj.(*models.SSnapshot)
+
 	host, _ := guest.GetHost()
 	url := fmt.Sprintf("%s/servers/%s/snapshot", host.ManagerUri, guest.Id)
 	body := jsonutils.NewDict()
 	body.Set("disk_id", jsonutils.NewString(diskId))
 	body.Set("snapshot_id", jsonutils.NewString(snapshotId))
+
+	if snapshot.DiskBackupId != "" {
+		backupObj, err := models.DiskBackupManager.FetchById(snapshot.DiskBackupId)
+		if err != nil {
+			return errors.Wrapf(err, "failed to find backup %s", snapshot.DiskBackupId)
+		}
+		backup := backupObj.(*models.SDiskBackup)
+		body.Set("backup_disk_config", jsonutils.Marshal(backup.DiskConfig))
+	}
+
 	header := self.getTaskRequestHeader(task)
-	_, _, err := httputils.JSONRequest(httputils.GetDefaultClient(), ctx, "POST", url, header, body, false)
+	_, _, err = httputils.JSONRequest(httputils.GetDefaultClient(), ctx, "POST", url, header, body, false)
 	return err
 }
 
@@ -281,6 +299,10 @@ func (self *SKVMGuestDriver) RequestUndeployGuestOnHost(ctx context.Context, gue
 
 func (self *SKVMGuestDriver) GetJsonDescAtHost(ctx context.Context, userCred mcclient.TokenCredential, guest *models.SGuest, host *models.SHost, params *jsonutils.JSONDict) (jsonutils.JSONObject, error) {
 	desc := guest.GetJsonDescAtHypervisor(ctx, host)
+	if len(desc.UserData) > 0 {
+		// host 需要加密后的user-data以提供 http://169.254.169.254/latest/user-data 解密访问
+		desc.UserData = base64.StdEncoding.EncodeToString([]byte(desc.UserData))
+	}
 	return jsonutils.Marshal(desc), nil
 }
 
@@ -313,7 +335,11 @@ func (self *SKVMGuestDriver) RequestStartOnHost(ctx context.Context, guest *mode
 	header := self.getTaskRequestHeader(task)
 
 	config := jsonutils.NewDict()
-	desc, err := guest.GetDriver().GetJsonDescAtHost(ctx, userCred, guest, host, nil)
+	drv, err := guest.GetDriver()
+	if err != nil {
+		return err
+	}
+	desc, err := drv.GetJsonDescAtHost(ctx, userCred, guest, host, nil)
 	if err != nil {
 		return errors.Wrapf(err, "GetJsonDescAtHost")
 	}
@@ -419,18 +445,15 @@ func (self *SKVMGuestDriver) RequestAssociateEip(ctx context.Context, userCred m
 	if err := eip.AssociateInstance(ctx, userCred, api.EIP_ASSOCIATE_TYPE_SERVER, guest); err != nil {
 		return errors.Wrapf(err, "associate eip %s(%s) to vm %s(%s)", eip.Name, eip.Id, guest.Name, guest.Id)
 	}
-	if err := eip.SetStatus(userCred, api.EIP_STATUS_READY, api.EIP_STATUS_ASSOCIATE); err != nil {
+	if err := eip.SetStatus(ctx, userCred, api.EIP_STATUS_READY, api.EIP_STATUS_ASSOCIATE); err != nil {
 		return errors.Wrapf(err, "set eip status to %s", api.EIP_STATUS_ALLOCATE)
 	}
 	return nil
 }
 
-func (self *SKVMGuestDriver) NeedStopForChangeSpec(ctx context.Context, guest *models.SGuest, addCpu int, addMemMb int) bool {
-	return guest.GetMetadata(ctx, api.VM_METADATA_HOTPLUG_CPU_MEM, nil) != "enable" || apis.IsARM(guest.OsArch)
-}
-
 func (self *SKVMGuestDriver) RequestChangeVmConfig(ctx context.Context, guest *models.SGuest, task taskman.ITask, instanceType string, vcpuCount, cpuSockets, vmemSize int64) error {
-	if jsonutils.QueryBoolean(task.GetParams(), "guest_online", false) {
+	taskParams := task.GetParams()
+	if jsonutils.QueryBoolean(taskParams, "guest_online", false) {
 		addCpu := vcpuCount - int64(guest.VcpuCount)
 		addMem := vmemSize - int64(guest.VmemSize)
 		if addCpu < 0 || addMem < 0 {
@@ -443,6 +466,10 @@ func (self *SKVMGuestDriver) RequestChangeVmConfig(ctx context.Context, guest *m
 		}
 		if vmemSize > int64(guest.VmemSize) {
 			body.Set("add_mem", jsonutils.NewInt(addMem))
+		}
+		if taskParams.Contains("cpu_numa_pin") {
+			cpuNumaPin, _ := taskParams.Get("cpu_numa_pin")
+			body.Set("cpu_numa_pin", cpuNumaPin)
 		}
 		host, _ := guest.GetHost()
 		url := fmt.Sprintf("%s/servers/%s/hotplug-cpu-mem", host.ManagerUri, guest.Id)
@@ -472,7 +499,7 @@ func (self *SKVMGuestDriver) RequestDetachDisk(ctx context.Context, guest *model
 }
 
 func (self *SKVMGuestDriver) RequestAttachDisk(ctx context.Context, guest *models.SGuest, disk *models.SDisk, task taskman.ITask) error {
-	return guest.StartSyncTask(
+	return guest.StartSyncTaskWithoutSyncstatus(
 		ctx,
 		task.GetUserCred(),
 		jsonutils.QueryBoolean(task.GetParams(), "sync_desc_only", false),
@@ -608,9 +635,15 @@ func (self *SKVMGuestDriver) GetDeployStatus() ([]string, error) {
 }
 
 func (self *SKVMGuestDriver) ValidateResizeDisk(guest *models.SGuest, disk *models.SDisk, storage *models.SStorage) error {
-	if guest.GetDiskIndex(disk.Id) <= 0 && guest.Status == api.VM_RUNNING {
-		return fmt.Errorf("Cann't online resize root disk")
+	if guest.Hypervisor == api.HYPERVISOR_KVM {
+		if guest.GetDiskIndex(disk.Id) <= 0 && guest.Status == api.VM_RUNNING {
+			return fmt.Errorf("Cann't online resize root disk")
+		}
+		if guest.Status == api.VM_RUNNING && storage.StorageType == api.STORAGE_SLVM {
+			return fmt.Errorf("shared lvm storage cann't online resize")
+		}
 	}
+
 	if !utils.IsInStringArray(guest.Status, []string{api.VM_READY, api.VM_RUNNING}) {
 		return fmt.Errorf("Cannot resize disk when guest in status %s", guest.Status)
 	}
@@ -618,7 +651,11 @@ func (self *SKVMGuestDriver) ValidateResizeDisk(guest *models.SGuest, disk *mode
 }
 
 func (self *SKVMGuestDriver) RequestSyncConfigOnHost(ctx context.Context, guest *models.SGuest, host *models.SHost, task taskman.ITask) error {
-	desc, err := guest.GetDriver().GetJsonDescAtHost(ctx, task.GetUserCred(), guest, host, nil)
+	drv, err := guest.GetDriver()
+	if err != nil {
+		return err
+	}
+	desc, err := drv.GetJsonDescAtHost(ctx, task.GetUserCred(), guest, host, nil)
 	if err != nil {
 		return errors.Wrapf(err, "GetJsonDescAtHost")
 	}
@@ -689,8 +726,15 @@ func (self *SKVMGuestDriver) RequestRebuildRootDisk(ctx context.Context, guest *
 }
 
 func (self *SKVMGuestDriver) RequestSyncToBackup(ctx context.Context, guest *models.SGuest, task taskman.ITask) error {
-	host, _ := guest.GetHost()
-	desc, err := guest.GetDriver().GetJsonDescAtHost(ctx, task.GetUserCred(), guest, host, nil)
+	host, err := guest.GetHost()
+	if err != nil {
+		return err
+	}
+	drv, err := guest.GetDriver()
+	if err != nil {
+		return err
+	}
+	desc, err := drv.GetJsonDescAtHost(ctx, task.GetUserCred(), guest, host, nil)
 	if err != nil {
 		return errors.Wrapf(err, "GetJsonDescAtHost")
 	}
@@ -764,7 +808,7 @@ func (self *SKVMGuestDriver) IsSupportLiveMigrate() bool {
 }
 
 func checkAssignHost(ctx context.Context, userCred mcclient.TokenCredential, preferHost string) error {
-	iHost, _ := models.HostManager.FetchByIdOrName(userCred, preferHost)
+	iHost, _ := models.HostManager.FetchByIdOrName(ctx, userCred, preferHost)
 	if iHost == nil {
 		return httperrors.NewBadRequestError("Host %s not found", preferHost)
 	}
@@ -993,7 +1037,7 @@ func (self *SKVMGuestDriver) ValidateCreateData(ctx context.Context, userCred mc
 		if input.Secgroups[i] == api.SECGROUP_DEFAULT_ID {
 			continue
 		}
-		secObj, err := validators.ValidateModel(userCred, models.SecurityGroupManager, &input.Secgroups[i])
+		secObj, err := validators.ValidateModel(ctx, userCred, models.SecurityGroupManager, &input.Secgroups[i])
 		if err != nil {
 			return nil, err
 		}
@@ -1096,10 +1140,10 @@ func (self *SKVMGuestDriver) QgaRequestGuestInfoTask(ctx context.Context, userCr
 	return res, nil
 }
 
-func (self *SKVMGuestDriver) QgaRequestSetNetwork(ctx context.Context, userCred mcclient.TokenCredential, body jsonutils.JSONObject, host *models.SHost, guest *models.SGuest) (jsonutils.JSONObject, error) {
+func (self *SKVMGuestDriver) QgaRequestSetNetwork(ctx context.Context, task taskman.ITask, body jsonutils.JSONObject, host *models.SHost, guest *models.SGuest) (jsonutils.JSONObject, error) {
 	url := fmt.Sprintf("%s/servers/%s/qga-set-network", host.ManagerUri, guest.Id)
 	httpClient := httputils.GetDefaultClient()
-	header := mcclient.GetTokenHeaders(userCred)
+	header := task.GetTaskRequestHeader()
 	_, res, err := httputils.JSONRequest(httpClient, ctx, "POST", url, header, body, false)
 	if err != nil {
 		return nil, errors.Wrap(err, "host request")
@@ -1109,6 +1153,17 @@ func (self *SKVMGuestDriver) QgaRequestSetNetwork(ctx context.Context, userCred 
 
 func (self *SKVMGuestDriver) QgaRequestGetNetwork(ctx context.Context, userCred mcclient.TokenCredential, body jsonutils.JSONObject, host *models.SHost, guest *models.SGuest) (jsonutils.JSONObject, error) {
 	url := fmt.Sprintf("%s/servers/%s/qga-get-network", host.ManagerUri, guest.Id)
+	httpClient := httputils.GetDefaultClient()
+	header := mcclient.GetTokenHeaders(userCred)
+	_, res, err := httputils.JSONRequest(httpClient, ctx, "POST", url, header, nil, false)
+	if err != nil {
+		return nil, errors.Wrap(err, "host request")
+	}
+	return res, nil
+}
+
+func (self *SKVMGuestDriver) QgaRequestGetOsInfo(ctx context.Context, userCred mcclient.TokenCredential, body jsonutils.JSONObject, host *models.SHost, guest *models.SGuest) (jsonutils.JSONObject, error) {
+	url := fmt.Sprintf("%s/servers/%s/qga-get-os-info", host.ManagerUri, guest.Id)
 	httpClient := httputils.GetDefaultClient()
 	header := mcclient.GetTokenHeaders(userCred)
 	_, res, err := httputils.JSONRequest(httpClient, ctx, "POST", url, header, nil, false)
@@ -1184,14 +1239,58 @@ func (self *SKVMGuestDriver) RequestStartRescue(ctx context.Context, task taskma
 	return nil
 }
 
-func (self *SKVMGuestDriver) RequestStopRescue(ctx context.Context, task taskman.ITask, body jsonutils.JSONObject, host *models.SHost, guest *models.SGuest) error {
-	header := self.getTaskRequestHeader(task)
-	client := httputils.GetDefaultClient()
-	url := fmt.Sprintf("%s/servers/%s/stop-rescue", host.ManagerUri, guest.Id)
-	_, _, err := httputils.JSONRequest(client, ctx, "POST", url, header, body, false)
+func (self *SKVMGuestDriver) ValidateSyncOSInfo(ctx context.Context, userCred mcclient.TokenCredential, guest *models.SGuest) error {
+	if !utils.IsInStringArray(guest.Status, []string{api.VM_RUNNING, api.VM_READY}) {
+		return httperrors.NewBadRequestError("can't sync guest os info in status %s", guest.Status)
+	}
+	return nil
+}
+
+func (kvm *SKVMGuestDriver) ValidateGuestChangeConfigInput(ctx context.Context, guest *models.SGuest, input api.ServerChangeConfigInput) (*api.ServerChangeConfigSettings, error) {
+	confs, err := kvm.SBaseGuestDriver.ValidateGuestChangeConfigInput(ctx, guest, input)
 	if err != nil {
-		return err
+		return nil, errors.Wrap(err, "SBaseGuestDriver.ValidateGuestChangeConfigInput")
 	}
 
-	return nil
+	if confs.ExtraCpuChanged() && guest.Status != api.VM_READY {
+		return nil, httperrors.NewInvalidStatusError("Can't change extra cpus on vm status %s", guest.Status)
+	}
+
+	for i := range input.ResetTrafficLimits {
+		input.ResetTrafficLimits[i].Mac = netutils.FormatMacAddr(input.ResetTrafficLimits[i].Mac)
+		_, err := guest.GetGuestnetworkByMac(input.ResetTrafficLimits[i].Mac)
+		if err != nil {
+			return nil, errors.Wrapf(err, "get guest network by ResetTrafficLimits mac %s", input.ResetTrafficLimits[i].Mac)
+		}
+	}
+	if len(input.ResetTrafficLimits) > 0 {
+		confs.ResetTrafficLimits = input.ResetTrafficLimits
+	}
+
+	for i := range input.SetTrafficLimits {
+		input.SetTrafficLimits[i].Mac = netutils.FormatMacAddr(input.SetTrafficLimits[i].Mac)
+		_, err := guest.GetGuestnetworkByMac(input.SetTrafficLimits[i].Mac)
+		if err != nil {
+			return nil, errors.Wrapf(err, "get guest network by SetTrafficLimits mac %s", input.SetTrafficLimits[i].Mac)
+		}
+	}
+	if len(input.SetTrafficLimits) > 0 {
+		confs.SetTrafficLimits = input.SetTrafficLimits
+	}
+
+	return confs, nil
+}
+
+func (kvm *SKVMGuestDriver) ValidateGuestHotChangeConfigInput(ctx context.Context, guest *models.SGuest, confs *api.ServerChangeConfigSettings) (*api.ServerChangeConfigSettings, error) {
+	if guest.GetMetadata(ctx, api.VM_METADATA_HOTPLUG_CPU_MEM, nil) != "enable" {
+		return confs, errors.Wrap(errors.ErrInvalidStatus, "host plug cpu memory is disabled")
+	}
+	if apis.IsARM(guest.OsArch) {
+		return confs, errors.Wrap(errors.ErrInvalidStatus, "cpu architecture is arm")
+	}
+	return confs, nil
+}
+
+func (kvm *SKVMGuestDriver) GetRandomNetworkTypes() []api.TNetworkType {
+	return []api.TNetworkType{api.NETWORK_TYPE_GUEST, api.NETWORK_TYPE_HOSTLOCAL}
 }

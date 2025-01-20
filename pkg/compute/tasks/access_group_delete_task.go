@@ -36,11 +36,8 @@ func init() {
 	taskman.RegisterTask(AccessGroupDeleteTask{})
 }
 
-func (self *AccessGroupDeleteTask) taskFailed(ctx context.Context, ag *models.SAccessGroup, cache *models.SAccessGroupCache, err error) {
-	ag.SetStatus(self.UserCred, api.ACCESS_GROUP_STATUS_DELETE_FAILED, err.Error())
-	if cache != nil {
-		cache.SetStatus(self.UserCred, api.ACCESS_GROUP_STATUS_DELETE_FAILED, err.Error())
-	}
+func (self *AccessGroupDeleteTask) taskFailed(ctx context.Context, ag *models.SAccessGroup, err error) {
+	ag.SetStatus(ctx, self.UserCred, api.ACCESS_GROUP_STATUS_DELETE_FAILED, err.Error())
 	logclient.AddActionLogWithStartable(self, ag, logclient.ACT_DELOCATE, err, self.UserCred, false)
 	self.SetStageFailed(ctx, jsonutils.NewString(err.Error()))
 }
@@ -48,29 +45,21 @@ func (self *AccessGroupDeleteTask) taskFailed(ctx context.Context, ag *models.SA
 func (self *AccessGroupDeleteTask) OnInit(ctx context.Context, obj db.IStandaloneModel, body jsonutils.JSONObject) {
 	ag := obj.(*models.SAccessGroup)
 
-	caches, err := ag.GetAccessGroupCaches()
+	iGroup, err := ag.GetICloudAccessGroup(ctx)
 	if err != nil {
-		self.taskFailed(ctx, ag, nil, errors.Wrapf(err, "GetAccessGroupCaches"))
+		if errors.Cause(err) == cloudprovider.ErrNotFound {
+			self.taskComplete(ctx, ag)
+			return
+		}
+		self.taskFailed(ctx, ag, errors.Wrapf(err, "GetICloudAccessGroup"))
 		return
 	}
-	for i := range caches {
-		caches[i].SetStatus(self.GetUserCred(), api.ACCESS_GROUP_STATUS_DELETING, "")
-		iAccessGroup, err := caches[i].GetICloudAccessGroup(ctx)
-		if err != nil {
-			if errors.Cause(err) == cloudprovider.ErrNotFound {
-				caches[i].RealDelete(ctx, self.GetUserCred())
-				continue
-			}
-			self.taskFailed(ctx, ag, &caches[i], errors.Wrapf(err, "cache.GetICloudAccessGroup"))
-			return
-		}
-		err = iAccessGroup.Delete()
-		if err != nil {
-			self.taskFailed(ctx, ag, &caches[i], errors.Wrapf(err, "iAccessGroup.Delete"))
-			return
-		}
-		caches[i].RealDelete(ctx, self.GetUserCred())
+	err = iGroup.Delete()
+	if err != nil {
+		self.taskFailed(ctx, ag, errors.Wrapf(err, "Delete"))
+		return
 	}
+
 	self.taskComplete(ctx, ag)
 }
 

@@ -51,7 +51,7 @@ func (self *DiskResetTask) getSnapshot() (*models.SSnapshot, error) {
 }
 
 func (self *DiskResetTask) TaskFailed(ctx context.Context, disk *models.SDisk, reason error) {
-	disk.SetStatus(self.UserCred, api.DISK_READY, "")
+	disk.SetStatus(ctx, self.UserCred, api.DISK_READY, "")
 	logclient.AddActionLogWithStartable(self, disk, logclient.ACT_RESET_DISK, reason, self.UserCred, false)
 	snapshot, _ := self.getSnapshot()
 	if snapshot != nil {
@@ -60,7 +60,7 @@ func (self *DiskResetTask) TaskFailed(ctx context.Context, disk *models.SDisk, r
 	self.SetStageFailed(ctx, jsonutils.Marshal(reason))
 	guests := disk.GetGuests()
 	if len(guests) == 1 {
-		guests[0].SetStatus(self.UserCred, api.VM_DISK_RESET_FAIL, reason.Error())
+		guests[0].SetStatus(ctx, self.UserCred, api.VM_DISK_RESET_FAIL, reason.Error())
 	}
 }
 
@@ -73,7 +73,7 @@ func (self *DiskResetTask) TaskCompleted(ctx context.Context, disk *models.SDisk
 		}
 	} else {
 		if len(guests) == 1 && !self.IsSubtask() {
-			guests[0].SetStatus(self.UserCred, api.VM_READY, "")
+			guests[0].SetStatus(ctx, self.UserCred, api.VM_READY, "")
 		}
 		// data不能为空指针，否则会导致AddActionLog抛空指针异常
 		if data == nil {
@@ -102,16 +102,29 @@ func (self *DiskResetTask) OnStartGuest(ctx context.Context, disk *models.SDisk,
 
 func (self *DiskResetTask) OnInit(ctx context.Context, obj db.IStandaloneModel, data jsonutils.JSONObject) {
 	disk := obj.(*models.SDisk)
-	storage, err := disk.GetStorage()
-	if err != nil {
-		self.TaskFailed(ctx, disk, errors.Wrapf(err, "disk.GetStorage"))
-		return
+	guest := disk.GetGuest()
+
+	var host *models.SHost
+	if guest == nil {
+		storage, err := disk.GetStorage()
+		if err != nil {
+			self.TaskFailed(ctx, disk, errors.Wrapf(err, "disk.GetStorage"))
+			return
+		}
+		host, err = storage.GetMasterHost()
+		if err != nil {
+			self.TaskFailed(ctx, disk, errors.Wrapf(err, "storage.GetMasterHost"))
+			return
+		}
+	} else {
+		var err error
+		host, err = guest.GetHost()
+		if err != nil {
+			self.TaskFailed(ctx, disk, errors.Wrapf(err, "guest.GetHost"))
+			return
+		}
 	}
-	host, err := storage.GetMasterHost()
-	if err != nil {
-		self.TaskFailed(ctx, disk, errors.Wrapf(err, "storage.GetMasterHost"))
-		return
-	}
+
 	self.RequestResetDisk(ctx, disk, host)
 }
 
@@ -124,7 +137,12 @@ func (self *DiskResetTask) RequestResetDisk(ctx context.Context, disk *models.SD
 	params := snapshot.GetRegionDriver().GetDiskResetParams(snapshot)
 
 	self.SetStage("OnRequestResetDisk", nil)
-	err = host.GetHostDriver().RequestResetDisk(ctx, host, disk, params, self)
+	driver, err := host.GetHostDriver()
+	if err != nil {
+		self.TaskFailed(ctx, disk, errors.Wrap(err, "GetHostDriver"))
+		return
+	}
+	err = driver.RequestResetDisk(ctx, host, disk, params, self)
 	if err != nil {
 		self.TaskFailed(ctx, disk, errors.Wrap(err, "RequestResetDisk"))
 	}
@@ -147,7 +165,7 @@ func (self *DiskResetTask) OnRequestResetDisk(ctx context.Context, disk *models.
 		return
 	}
 
-	disk.SetStatus(self.UserCred, api.DISK_READY, "")
+	disk.SetStatus(ctx, self.UserCred, api.DISK_READY, "")
 	self.TaskCompleted(ctx, disk, nil)
 }
 
@@ -172,7 +190,12 @@ func (self *DiskCleanUpSnapshotsTask) StartCleanUpSnapshots(ctx context.Context,
 		return
 	}
 	self.SetStage("OnCleanUpSnapshots", nil)
-	err := host.GetHostDriver().RequestCleanUpDiskSnapshots(ctx, host, disk, self.Params, self)
+	driver, err := host.GetHostDriver()
+	if err != nil {
+		self.SetStageFailed(ctx, jsonutils.NewString(errors.Wrapf(err, "GetHostDriver").Error()))
+		return
+	}
+	err = driver.RequestCleanUpDiskSnapshots(ctx, host, disk, self.Params, self)
 	if err != nil {
 		self.SetStageFailed(ctx, jsonutils.NewString(err.Error()))
 	}

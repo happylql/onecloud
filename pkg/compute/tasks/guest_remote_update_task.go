@@ -39,7 +39,11 @@ func (self *GuestRemoteUpdateTask) OnInit(ctx context.Context, obj db.IStandalon
 	self.SetStage("OnRemoteUpdateComplete", nil)
 	replaceTags := jsonutils.QueryBoolean(self.Params, "replace_tags", false)
 	taskman.LocalTaskRun(self, func() (jsonutils.JSONObject, error) {
-		err := guest.GetDriver().RequestRemoteUpdate(ctx, guest, self.UserCred, replaceTags)
+		drv, err := guest.GetDriver()
+		if err != nil {
+			return nil, err
+		}
+		err = drv.RequestRemoteUpdate(ctx, guest, self.UserCred, replaceTags)
 		if err != nil {
 			return nil, errors.Wrap(err, "RequestRemoteUpdate")
 		}
@@ -54,7 +58,7 @@ func (self *GuestRemoteUpdateTask) OnRemoteUpdateComplete(ctx context.Context, g
 }
 
 func (self *GuestRemoteUpdateTask) OnRemoteUpdateCompleteFailed(ctx context.Context, guest *models.SGuest, data jsonutils.JSONObject) {
-	guest.SetStatus(self.UserCred, api.VM_UPDATE_TAGS_FAILED, data.String())
+	guest.SetStatus(ctx, self.UserCred, api.VM_UPDATE_TAGS_FAILED, data.String())
 	self.SetStageFailed(ctx, data)
 }
 

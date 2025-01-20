@@ -20,7 +20,6 @@ import (
 	"crypto/tls"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"mime/multipart"
 	"net/http"
 	"net/url"
@@ -133,6 +132,7 @@ func (self *SProxmoxClient) GetRegions() ([]SRegion, error) {
 }
 
 type ProxmoxError struct {
+	Url     string
 	Message string
 	Code    int
 	Params  []string
@@ -148,7 +148,7 @@ func (ce *ProxmoxError) ParseErrorFromJsonResponse(statusCode int, status string
 	ce.Status = status
 	if body != nil {
 		body.Unmarshal(ce)
-		log.Errorf("error: %v", body.PrettyString())
+		log.Errorf("%s status: %s(%d) error: %v", ce.Url, status, statusCode, body.PrettyString())
 	}
 	if ce.Code == 0 && statusCode > 0 {
 		ce.Code = statusCode
@@ -289,7 +289,7 @@ func (cli *SProxmoxClient) __jsonRequest(method httputils.THttpMethod, res strin
 	}
 
 	req.SetHeader(header)
-	oe := &ProxmoxError{}
+	oe := &ProxmoxError{Url: url}
 	_, resp, err := client.Send(context.Background(), req, oe, cli.debug)
 	if err != nil {
 		return nil, err
@@ -340,7 +340,7 @@ func (cli *SProxmoxClient) upload(node, storageName, filename string, reader io.
 	}
 	defer resp.Body.Close()
 
-	data, err := ioutil.ReadAll(resp.Body)
+	data, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, err
 	}
@@ -368,8 +368,13 @@ func (cli *SProxmoxClient) upload(node, storageName, filename string, reader io.
 	return nil, errors.Wrapf(cloudprovider.ErrNotFound, "after upload")
 }
 
+func (cli *SProxmoxClient) GetCloudRegionExternalIdPrefix() string {
+	return fmt.Sprintf("%s/%s", CLOUD_PROVIDER_PROXMOX, cli.cpcfg.Id)
+}
+
 func (self *SProxmoxClient) GetSubAccounts() ([]cloudprovider.SSubAccount, error) {
 	subAccount := cloudprovider.SSubAccount{}
+	subAccount.Id = self.host
 	subAccount.Name = self.cpcfg.Name
 	subAccount.Account = self.username
 	subAccount.HealthStatus = api.CLOUD_PROVIDER_HEALTH_NORMAL
@@ -380,11 +385,11 @@ func (self *SProxmoxClient) GetAccountId() string {
 	return self.host
 }
 
-func (self *SProxmoxClient) GetIRegions() []cloudprovider.ICloudRegion {
+func (self *SProxmoxClient) GetIRegions() ([]cloudprovider.ICloudRegion, error) {
 	ret := []cloudprovider.ICloudRegion{}
 	region := self.GetRegion()
 	ret = append(ret, region)
-	return ret
+	return ret, nil
 }
 
 func (self *SProxmoxClient) GetCapabilities() []string {

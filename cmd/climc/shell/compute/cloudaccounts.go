@@ -17,7 +17,7 @@ package compute
 import (
 	"yunion.io/x/onecloud/cmd/climc/shell"
 	modules "yunion.io/x/onecloud/pkg/mcclient/modules/compute"
-	"yunion.io/x/onecloud/pkg/mcclient/options"
+	options "yunion.io/x/onecloud/pkg/mcclient/options/compute"
 )
 
 func init() {
@@ -61,6 +61,7 @@ func init() {
 	cmd.CreateWithKeyword("create-cucloud", &options.SCucloudCloudAccountCreateOptions{})
 	cmd.CreateWithKeyword("create-qingcloud", &options.SQingCloudCloudAccountCreateOptions{})
 	cmd.CreateWithKeyword("create-oracle", &options.SOracleCloudAccountCreateOptions{})
+	cmd.CreateWithKeyword("create-cephfs", &options.SCephFSCloudAccountCreateOptions{})
 
 	cmd.UpdateWithKeyword("update-vmware", &options.SVMwareCloudAccountUpdateOptions{})
 	cmd.UpdateWithKeyword("update-aliyun", &options.SAliyunCloudAccountUpdateOptions{})
@@ -150,5 +151,4 @@ func init() {
 	cmd.Get("change-owner-candidate-domains", &options.SCloudAccountIdOptions{})
 	cmd.Get("enrollment-accounts", &options.SCloudAccountIdOptions{})
 	cmd.Get("balance", &options.SCloudAccountIdOptions{})
-	cmd.Get("saml", &options.SCloudAccountIdOptions{})
 }

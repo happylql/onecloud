@@ -37,10 +37,10 @@ func init() {
 }
 
 func (self *EipAssociateTask) taskFail(ctx context.Context, eip *models.SElasticip, obj db.IStatusStandaloneModel, err error) {
-	eip.SetStatus(self.UserCred, api.EIP_STATUS_ASSOCIATE_FAIL, err.Error())
+	eip.SetStatus(ctx, self.UserCred, api.EIP_STATUS_ASSOCIATE_FAIL, err.Error())
 	self.SetStageFailed(ctx, jsonutils.NewString(err.Error()))
 	if obj != nil {
-		db.StatusBaseSetStatus(obj, self.GetUserCred(), api.INSTANCE_ASSOCIATE_EIP_FAILED, err.Error())
+		db.StatusBaseSetStatus(ctx, obj, self.GetUserCred(), api.INSTANCE_ASSOCIATE_EIP_FAILED, err.Error())
 		db.OpsLog.LogEvent(obj, db.ACT_EIP_ATTACH, err, self.GetUserCred())
 		logclient.AddActionLogWithStartable(self, obj, logclient.ACT_EIP_ASSOCIATE, err, self.UserCred, false)
 	}
@@ -56,7 +56,7 @@ func (self *EipAssociateTask) GetAssociateInput() (api.ElasticipAssociateInput, 
 	return input, nil
 }
 
-func (self *EipAssociateTask) GetAssociateObj() (db.IStatusStandaloneModel, api.ElasticipAssociateInput, error) {
+func (self *EipAssociateTask) GetAssociateObj(ctx context.Context) (db.IStatusStandaloneModel, api.ElasticipAssociateInput, error) {
 	input, err := self.GetAssociateInput()
 	if err != nil {
 		return nil, input, errors.Wrapf(err, "GetAssociateInput")
@@ -64,7 +64,7 @@ func (self *EipAssociateTask) GetAssociateObj() (db.IStatusStandaloneModel, api.
 
 	switch input.InstanceType {
 	case api.EIP_ASSOCIATE_TYPE_SERVER:
-		vmObj, err := db.FetchByIdOrName(models.GuestManager, self.UserCred, input.InstanceId)
+		vmObj, err := db.FetchByIdOrName(ctx, models.GuestManager, self.UserCred, input.InstanceId)
 		if err != nil {
 			return nil, input, errors.Wrapf(err, "GuestManager.FetchByIdOrName(%q)", input.InstanceId)
 		}
@@ -72,7 +72,7 @@ func (self *EipAssociateTask) GetAssociateObj() (db.IStatusStandaloneModel, api.
 		input.InstanceExternalId = vm.ExternalId
 		return vm, input, nil
 	case api.EIP_ASSOCIATE_TYPE_NAT_GATEWAY:
-		natObj, err := db.FetchByIdOrName(models.NatGatewayManager, self.UserCred, input.InstanceId)
+		natObj, err := db.FetchByIdOrName(ctx, models.NatGatewayManager, self.UserCred, input.InstanceId)
 		if err != nil {
 			return nil, input, errors.Wrapf(err, "NatGatewayManager.FetchByIdOrName(%q)", input.InstanceId)
 		}
@@ -87,7 +87,7 @@ func (self *EipAssociateTask) GetAssociateObj() (db.IStatusStandaloneModel, api.
 		grp := grpObj.(*models.SGroup)
 		return grp, input, nil
 	case api.EIP_ASSOCIATE_TYPE_LOADBALANCER:
-		obj, err := db.FetchByIdOrName(models.LoadbalancerManager, self.UserCred, input.InstanceId)
+		obj, err := db.FetchByIdOrName(ctx, models.LoadbalancerManager, self.UserCred, input.InstanceId)
 		if err != nil {
 			return nil, input, errors.Wrapf(err, "LoadbalancerManager.FetchByIdOrName(%q)", input.InstanceId)
 		}
@@ -108,13 +108,13 @@ func (self *EipAssociateTask) OnInit(ctx context.Context, obj db.IStandaloneMode
 		return
 	}
 
-	ins, input, err := self.GetAssociateObj()
+	ins, input, err := self.GetAssociateObj(ctx)
 	if err != nil {
 		self.taskFail(ctx, eip, nil, errors.Wrapf(err, "self.GetAssociateObj"))
 		return
 	}
 
-	db.StatusBaseSetStatus(ins, self.GetUserCred(), api.INSTANCE_ASSOCIATE_EIP, "associate eip")
+	db.StatusBaseSetStatus(ctx, ins, self.GetUserCred(), api.INSTANCE_ASSOCIATE_EIP, "associate eip")
 
 	self.SetStage("OnAssociateEipComplete", nil)
 	err = region.GetDriver().RequestAssociateEip(ctx, self.UserCred, eip, input, ins, self)
@@ -127,7 +127,7 @@ func (self *EipAssociateTask) OnInit(ctx context.Context, obj db.IStandaloneMode
 func (self *EipAssociateTask) OnAssociateEipComplete(ctx context.Context, obj db.IStandaloneModel, data jsonutils.JSONObject) {
 	eip := obj.(*models.SElasticip)
 
-	ins, input, err := self.GetAssociateObj()
+	ins, input, err := self.GetAssociateObj(ctx)
 	if err == nil {
 		switch input.InstanceType {
 		case api.EIP_ASSOCIATE_TYPE_SERVER:
@@ -140,7 +140,7 @@ func (self *EipAssociateTask) OnAssociateEipComplete(ctx context.Context, obj db
 			logclient.AddActionLogWithStartable(self, eip, logclient.ACT_NATGATEWAY_ASSOCIATE, ins, self.UserCred, true)
 		case api.EIP_ASSOCIATE_TYPE_INSTANCE_GROUP:
 			grp := ins.(*models.SGroup)
-			grp.SetStatus(self.UserCred, "init", "success")
+			grp.SetStatus(ctx, self.UserCred, "init", "success")
 			logclient.AddActionLogWithStartable(self, eip, logclient.ACT_NATGATEWAY_ASSOCIATE, ins, self.UserCred, true)
 		case api.EIP_ASSOCIATE_TYPE_LOADBALANCER:
 			lb := ins.(*models.SLoadbalancer)
@@ -155,6 +155,6 @@ func (self *EipAssociateTask) OnAssociateEipComplete(ctx context.Context, obj db
 
 func (self *EipAssociateTask) OnAssociateEipCompleteFailed(ctx context.Context, obj db.IStandaloneModel, data jsonutils.JSONObject) {
 	eip := obj.(*models.SElasticip)
-	ins, _, _ := self.GetAssociateObj()
+	ins, _, _ := self.GetAssociateObj(ctx)
 	self.taskFail(ctx, eip, ins, errors.Errorf(data.String()))
 }

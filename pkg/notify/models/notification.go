@@ -96,7 +96,7 @@ func (nm *SNotificationManager) ValidateCreateData(ctx context.Context, userCred
 	// check robot
 	robots := []string{}
 	for i := range input.Robots {
-		_robot, err := validators.ValidateModel(userCred, RobotManager, &input.Robots[i])
+		_robot, err := validators.ValidateModel(ctx, userCred, RobotManager, &input.Robots[i])
 		if err != nil && !input.IgnoreNonexistentReceiver {
 			return input, err
 		}
@@ -188,10 +188,10 @@ func (n *SNotification) CustomizeCreate(ctx context.Context, userCred mcclient.T
 
 func (n *SNotification) PostCreate(ctx context.Context, userCred mcclient.TokenCredential, ownerId mcclient.IIdentityProvider, query jsonutils.JSONObject, data jsonutils.JSONObject) {
 	n.SStatusStandaloneResourceBase.PostCreate(ctx, userCred, ownerId, query, data)
-	n.SetStatus(userCred, api.NOTIFICATION_STATUS_RECEIVED, "")
+	n.SetStatus(ctx, userCred, api.NOTIFICATION_STATUS_RECEIVED, "")
 	task, err := taskman.TaskManager.NewTask(ctx, "NotificationSendTask", n, userCred, nil, "", "")
 	if err != nil {
-		n.SetStatus(userCred, api.NOTIFICATION_STATUS_FAILED, "NewTask")
+		n.SetStatus(ctx, userCred, api.NOTIFICATION_STATUS_FAILED, "NewTask")
 		return
 	}
 	task.ScheduleRun(nil)
@@ -212,10 +212,7 @@ func (nm *SNotificationManager) PerformEventNotify(ctx context.Context, userCred
 
 	topic, err := TopicManager.TopicByEvent(input.Event)
 	if err != nil {
-		return output, errors.Wrapf(err, "unable fetch subscriptions by event %q", input.Event)
-	}
-	if topic == nil {
-		return output, nil
+		return output, errors.Wrapf(err, "TopicByEvent")
 	}
 	receiverIds := make(map[string]uint32)
 	receiverIds1, err := SubscriberManager.getReceiversSent(ctx, topic.Id, input.ProjectDomainId, input.ProjectId)
@@ -273,10 +270,13 @@ func (nm *SNotificationManager) PerformEventNotify(ctx context.Context, userCred
 	}
 
 	receiverIdList := []string{}
-	for k, _ := range receiverIds {
+	for k := range receiverIds {
 		receiverIdList = append(receiverIdList, k)
 	}
 	receivers, err := ReceiverManager.FetchByIdOrNames(ctx, receiverIdList...)
+	if err != nil {
+		return output, errors.Wrap(err, "fetch receiver")
+	}
 	webconsoleContacts := sets.NewString()
 	idSet := sets.NewString()
 	for i := range receivers {
@@ -626,7 +626,7 @@ func (n *SNotification) ReceiverNotificationsNotOK() ([]SReceiverNotification, e
 
 func (n *SNotification) receiveDetails(userCred mcclient.TokenCredential, scope string) ([]api.ReceiveDetail, error) {
 	RQ := ReceiverManager.Query("id", "name")
-	q := ReceiverNotificationManager.Query("receiver_id", "notification_id", "receiver_type", "contact", "send_at", "send_by", "status", "failed_reason").Equals("notification_id", n.Id)
+	q := ReceiverNotificationManager.Query("receiver_id", "notification_id", "receiver_type", "contact", "send_at", "send_by", "status", "failed_reason").Equals("notification_id", n.Id).IsNotEmpty("receiver_id").IsNullOrEmpty("contact")
 	s := rbacscope.TRbacScope(scope)
 
 	switch s {
@@ -710,7 +710,7 @@ func (nm *SNotificationManager) FetchOwnerId(ctx context.Context, data jsonutils
 	return db.FetchUserInfo(ctx, data)
 }
 
-func (nm *SNotificationManager) FilterByOwner(q *sqlchemy.SQuery, man db.FilterByOwnerProvider, userCred mcclient.TokenCredential, owner mcclient.IIdentityProvider, scope rbacscope.TRbacScope) *sqlchemy.SQuery {
+func (nm *SNotificationManager) FilterByOwner(ctx context.Context, q *sqlchemy.SQuery, man db.FilterByOwnerProvider, userCred mcclient.TokenCredential, owner mcclient.IIdentityProvider, scope rbacscope.TRbacScope) *sqlchemy.SQuery {
 	if owner == nil {
 		return q
 	}

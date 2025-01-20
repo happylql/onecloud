@@ -73,14 +73,6 @@ func NewLocalStorage(manager *SStorageManager, path string, index int) *SLocalSt
 	return ret
 }
 
-func (s *SLocalStorage) GetFuseTmpPath() string {
-	return path.Join(s.Path, _FUSE_TMP_PATH_)
-}
-
-func (s *SLocalStorage) GetFuseMountPath() string {
-	return path.Join(s.Path, _FUSE_MOUNT_PATH_)
-}
-
 func (s *SLocalStorage) StorageType() string {
 	return api.STORAGE_LOCAL
 }
@@ -106,7 +98,7 @@ func (s *SLocalStorage) GetComposedName() string {
 }
 
 func (s *SLocalStorage) CreateDiskFromBackup(ctx context.Context, disk IDisk, input *SDiskCreateByDiskinfo) error {
-	err := doRestoreDisk(ctx, input.DiskInfo, disk.GetPath(), input.DiskInfo.Format)
+	err := doRestoreDisk(ctx, s, input, disk, disk.GetPath())
 	if err != nil {
 		return errors.Wrap(err, "doRestoreDisk")
 	}
@@ -322,6 +314,11 @@ func (s *SLocalStorage) SyncStorageInfo() (jsonutils.JSONObject, error) {
 			return nil, errors.Wrapf(err, "Storages.Put %s", s.StorageId)
 		}
 	} else {
+		res, err = modules.Storages.GetByName(hostutils.GetComputeSession(context.Background()), name, nil)
+		if err == nil {
+			return res, nil
+		}
+
 		var mediumType string
 		mediumType, err = s.GetMediumType()
 		if err != nil {
@@ -350,11 +347,12 @@ func (s *SLocalStorage) GetDiskById(diskId string) (IDisk, error) {
 		}
 	}
 	var disk = NewLocalDisk(s, diskId)
-	if disk.Probe() == nil {
+	err := disk.Probe()
+	if err == nil {
 		s.Disks = append(s.Disks, disk)
 		return disk, nil
 	}
-	return nil, errors.ErrNotFound
+	return nil, errors.Wrapf(errors.ErrNotFound, "probe: %s", err)
 }
 
 func (s *SLocalStorage) CreateDisk(diskId string) IDisk {
@@ -644,16 +642,101 @@ func (s *SLocalStorage) CreateSnapshotFormUrl(
 }
 
 func (s *SLocalStorage) DeleteSnapshots(ctx context.Context, params interface{}) (jsonutils.JSONObject, error) {
-	diskId, ok := params.(string)
+	input, ok := params.(*SStorageDeleteSnapshots)
 	if !ok {
 		return nil, hostutils.ParamsError
 	}
-	snapshotDir := path.Join(s.GetSnapshotDir(), diskId+options.HostOptions.SnapshotDirSuffix)
+	snapshotDir := path.Join(s.GetSnapshotDir(), input.DiskId+options.HostOptions.SnapshotDirSuffix)
 	output, err := procutils.NewCommand("rm", "-rf", snapshotDir).Output()
 	if err != nil {
 		return nil, fmt.Errorf("Delete snapshot dir failed: %s", output)
 	}
 	return nil, nil
+}
+
+func (s *SLocalStorage) DeleteSnapshot(ctx context.Context, params interface{}) (jsonutils.JSONObject, error) {
+	input, ok := params.(*SStorageDeleteSnapshot)
+	if !ok {
+		return nil, hostutils.ParamsError
+	}
+
+	log.Errorf("input %s", jsonutils.Marshal(input))
+	snapshotDir := path.Join(s.GetSnapshotDir(), input.DiskId+options.HostOptions.SnapshotDirSuffix)
+	diskPath := path.Join(s.GetPath(), input.DiskId)
+	err := DeleteLocalSnapshot(snapshotDir, input.SnapshotId, diskPath, input.ConvertSnapshot, input.BlockStream)
+	if err != nil {
+		return nil, err
+	}
+	res := jsonutils.NewDict()
+	res.Set("deleted", jsonutils.JSONTrue)
+	return res, nil
+}
+
+func DeleteLocalSnapshot(snapshotDir, snapshotId, diskPath, convertSnapshot string, blockStream bool) error {
+	//snapshotDir := d.GetSnapshotDir()
+	snapshotPath := path.Join(snapshotDir, snapshotId)
+	if blockStream {
+		//diskPath := d.getPath()
+		output := diskPath + ".tmp"
+		if fileutils2.Exists(output) {
+			procutils.NewCommand("rm", "-f", output).Run()
+		}
+		img, err := qemuimg.NewQemuImage(diskPath)
+		if err != nil {
+			return errors.Wrap(err, "NewQemuImage")
+		}
+		if err = img.Convert2Qcow2To(output, false, "", "", ""); err != nil {
+			log.Errorf("convert image %s to %s: %s", img.Path, output, err)
+			procutils.NewCommand("rm", "-f", output).Run()
+			return err
+		}
+		if err = procutils.NewCommand("rm", "-f", diskPath).Run(); err != nil {
+			log.Errorf("rm convert disk file %s: %s", diskPath, err)
+			return err
+		}
+		if err = procutils.NewCommand("mv", "-f", output, diskPath).Run(); err != nil {
+			log.Errorf("mv disk file %s to %s: %s", output, diskPath, err)
+			return err
+		}
+	} else if len(convertSnapshot) > 0 {
+		if !fileutils2.Exists(snapshotDir) {
+			err := procutils.NewCommand("mkdir", "-p", snapshotDir).Run()
+			if err != nil {
+				log.Errorln(err)
+				return err
+			}
+		}
+		convertSnapshotPath := path.Join(snapshotDir, convertSnapshot)
+		output := convertSnapshotPath + ".tmp"
+		if fileutils2.Exists(output) {
+			procutils.NewCommand("rm", "-f", output).Run()
+		}
+		img, err := qemuimg.NewQemuImage(convertSnapshotPath)
+		if err != nil {
+			return errors.Wrap(err, "NewQemuImage")
+		}
+		if err = img.Convert2Qcow2To(output, false, "", "", ""); err != nil {
+			log.Errorf("convert image %s to %s: %s", img.Path, output, err)
+			procutils.NewCommand("rm", "-f", output).Run()
+			return err
+		}
+		if err = procutils.NewCommand("rm", "-f", convertSnapshotPath).Run(); err != nil {
+			log.Errorf("rm convert snapshot file %s: %s", convertSnapshotPath, err)
+			return err
+		}
+		if err = procutils.NewCommand("mv", "-f", output, convertSnapshotPath).Run(); err != nil {
+			log.Errorf("mv snapshot file %s to %s: %s", output, convertSnapshotPath, err)
+			return err
+		}
+	}
+	if fileutils2.Exists(snapshotPath) {
+		out, err := procutils.NewCommand("rm", "-f", snapshotPath).Output()
+		if err != nil {
+			log.Errorf("rm snapshot file: %s %s", out, err)
+			return errors.Wrap(err, "rm snapshot file")
+		}
+	}
+	return nil
 }
 
 func (s *SLocalStorage) DestinationPrepareMigrate(
@@ -737,7 +820,7 @@ func (s *SLocalStorage) DestinationPrepareMigrate(
 	if liveMigrate {
 		// create local disk
 		backingFile, _ := disksBackingFile.GetString(diskId)
-		_, err := disk.CreateRaw(ctx, int(diskinfo.Size), "qcow2", "", encInfo, "", backingFile)
+		_, err := disk.CreateRaw(ctx, int(diskinfo.Size), "qcow2", "", nil, encInfo, "", backingFile)
 		if err != nil {
 			log.Errorln(err)
 			return err
@@ -757,7 +840,7 @@ func (s *SLocalStorage) DestinationPrepareMigrate(
 			return errors.Wrap(err, "CreateFromUrl")
 		}
 	}
-	if rebaseDisks && len(templateId) > 0 && len(baseImagePath) == 0 {
+	if rebaseDisks && len(templateId) > 0 && len(baseImagePath) == 0 && sysDiskHasTemplate {
 		templatePath := path.Join(storageManager.LocalStorageImagecacheManager.GetPath(), templateId)
 		// check if template is encrypted
 		img, err := qemuimg.NewQemuImage(templatePath)
@@ -797,9 +880,81 @@ func doRebaseDisk(diskPath, newBasePath string, encInfo *apis.SEncryptInfo) erro
 	return nil
 }
 
-func (s *SLocalStorage) CreateDiskFromSnapshot(
-	ctx context.Context, disk IDisk, input *SDiskCreateByDiskinfo,
-) error {
+func (s *SLocalStorage) DiskMigrate(ctx context.Context, params interface{}) (jsonutils.JSONObject, error) {
+	input := params.(*SDiskMigrate)
+
+	disk := s.CreateDisk(input.DiskId)
+	snapshots := input.SnapsChain
+	diskOutChainSnaps := input.OutChainSnaps
+	// prepare disk snapshot dir
+	if len(snapshots) > 0 && !fileutils2.Exists(disk.GetSnapshotDir()) {
+		output, err := procutils.NewCommand("mkdir", "-p", disk.GetSnapshotDir()).Output()
+		if err != nil {
+			return nil, errors.Wrapf(err, "mkdir %s failed: %s", disk.GetSnapshotDir(), output)
+		}
+	}
+
+	baseImagePath := ""
+	templateId := input.TemplateId
+	for i, snapshotId := range snapshots {
+		snapId, _ := snapshotId.GetString()
+		snapshotUrl := fmt.Sprintf("%s/%s/%s/%s",
+			input.SnapshotsUri, input.SrcStorageId, input.DiskId, snapId)
+		snapshotPath := path.Join(disk.GetSnapshotDir(), snapId)
+		log.Infof("Disk %s snapshot %s url: %s", input.DiskId, snapId, snapshotUrl)
+		if err := s.CreateSnapshotFormUrl(ctx, snapshotUrl, input.DiskId, snapshotPath); err != nil {
+			return nil, errors.Wrap(err, "create from snapshot url failed")
+		}
+		if i == 0 && len(templateId) > 0 && input.SysDiskHasTemplate {
+			templatePath := path.Join(storageManager.LocalStorageImagecacheManager.GetPath(), templateId)
+			if err := doRebaseDisk(snapshotPath, templatePath, nil); err != nil {
+				return nil, err
+			}
+		} else if len(baseImagePath) > 0 {
+			if err := doRebaseDisk(snapshotPath, baseImagePath, nil); err != nil {
+				return nil, err
+			}
+		}
+		baseImagePath = snapshotPath
+	}
+
+	for _, snapshotId := range diskOutChainSnaps {
+		snapId, _ := snapshotId.GetString()
+		snapshotUrl := fmt.Sprintf("%s/%s/%s/%s",
+			input.SnapshotsUri, input.SrcStorageId, input.DiskId, snapId)
+		snapshotPath := path.Join(disk.GetSnapshotDir(), snapId)
+		log.Infof("Disk %s snapshot %s url: %s", input.DiskId, snapId, snapshotUrl)
+		if err := s.CreateSnapshotFormUrl(ctx, snapshotUrl, input.DiskId, snapshotPath); err != nil {
+			return nil, errors.Wrap(err, "create from snapshot url failed")
+		}
+	}
+
+	// download disk form remote url
+	diskUrl := fmt.Sprintf("%s/%s/%s", input.DiskUri, input.SrcStorageId, input.DiskId)
+	err := disk.CreateFromUrl(ctx, diskUrl, 0, func(progress, progressMbps float64, totalSizeMb int64) {
+		log.Debugf("[%.2f / %d] disk %s create %.2f with speed %.2fMbps",
+			progress*float64(totalSizeMb)/100, totalSizeMb, disk.GetId(), progress, progressMbps)
+	})
+	if err != nil {
+		return nil, errors.Wrap(err, "CreateFromUrl")
+	}
+	if len(templateId) > 0 && len(baseImagePath) == 0 {
+		templatePath := path.Join(storageManager.LocalStorageImagecacheManager.GetPath(), templateId)
+		if err := doRebaseDisk(disk.GetPath(), templatePath, nil); err != nil {
+			return nil, err
+		}
+	} else if len(baseImagePath) > 0 {
+		if err := doRebaseDisk(disk.GetPath(), baseImagePath, nil); err != nil {
+			return nil, err
+		}
+	}
+
+	res := jsonutils.NewDict()
+	res.Set("disk_path", jsonutils.NewString(disk.GetPath()))
+	return nil, nil
+}
+
+func (s *SLocalStorage) CreateDiskFromSnapshot(ctx context.Context, disk IDisk, input *SDiskCreateByDiskinfo) (jsonutils.JSONObject, error) {
 	info := input.DiskInfo
 	if info.Protocol == "fuse" {
 		var encryptInfo *apis.SEncryptInfo
@@ -808,11 +963,11 @@ func (s *SLocalStorage) CreateDiskFromSnapshot(
 		}
 		err := disk.CreateFromImageFuse(ctx, info.SnapshotUrl, int64(info.DiskSizeMb), encryptInfo)
 		if err != nil {
-			return errors.Wrapf(err, "CreateFromImageFuse")
+			return nil, errors.Wrapf(err, "CreateFromImageFuse")
 		}
-		return nil
+		return disk.GetDiskDesc(), nil
 	}
-	return httperrors.NewUnsupportOperationError("Unsupport protocol %s for Local storage", info.Protocol)
+	return nil, httperrors.NewUnsupportOperationError("Unsupport protocol %s for Local storage", info.Protocol)
 }
 
 func (s *SLocalStorage) CreateDiskFromExistingPath(
@@ -858,4 +1013,9 @@ func (s *SLocalStorage) CloneDiskFromStorage(
 		TargetAccessPath: accessPath,
 		TargetFormat:     qemuimgfmt.QCOW2.String(),
 	}, nil
+}
+
+func (s *SLocalStorage) CleanRecycleDiskfiles(ctx context.Context) {
+	cleanDailyFiles(s.Path, _RECYCLE_BIN_, options.HostOptions.RecycleDiskfileKeepDays)
+	cleanDailyFiles(s.Path, _IMGSAVE_BACKUPS_, options.HostOptions.RecycleDiskfileKeepDays)
 }

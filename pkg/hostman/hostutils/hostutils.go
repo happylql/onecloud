@@ -27,6 +27,7 @@ import (
 	"yunion.io/x/pkg/util/regutils"
 
 	"yunion.io/x/onecloud/pkg/apis"
+	computeapi "yunion.io/x/onecloud/pkg/apis/compute"
 	hostapi "yunion.io/x/onecloud/pkg/apis/host"
 	"yunion.io/x/onecloud/pkg/appsrv"
 	"yunion.io/x/onecloud/pkg/cloudcommon/consts"
@@ -38,11 +39,27 @@ import (
 	"yunion.io/x/onecloud/pkg/httperrors"
 	"yunion.io/x/onecloud/pkg/mcclient"
 	"yunion.io/x/onecloud/pkg/mcclient/auth"
+	"yunion.io/x/onecloud/pkg/mcclient/modulebase"
 	modules "yunion.io/x/onecloud/pkg/mcclient/modules/compute"
 	"yunion.io/x/onecloud/pkg/mcclient/modules/k8s"
 	"yunion.io/x/onecloud/pkg/util/cgrouputils/cpuset"
 	"yunion.io/x/onecloud/pkg/util/fileutils2"
+	"yunion.io/x/onecloud/pkg/util/pod"
 )
+
+type SContainerCpufreqSimulateConfig struct {
+	CpuinfoMaxFreq            int    `json:"cpuinfo_max_freq"`
+	CpuinfoMinFreq            int    `json:"cpuinfo_min_freq"`
+	CpuinfoCurFreq            int    `json:"cpuinfo_cur_freq"`
+	CpuinfoTransitionLatency  int    `json:"cpuinfo_transition_latency"`
+	ScalingDriver             string `json:"scaling_driver"`
+	ScalingGovernors          string `json:"scaling_governor"`
+	ScalingMaxFreq            int    `json:"scaling_max_freq"`
+	ScalingMinFreq            int    `json:"scaling_min_freq"`
+	ScalingCurFreq            int    `json:"scaling_cur_freq"`
+	ScalingSetspeed           string `json:"scaling_setspeed"`
+	ScalingAvailableGovernors string `json:"scaling_available_governors"`
+}
 
 type IHost interface {
 	GetZoneId() string
@@ -51,11 +68,16 @@ type IHost interface {
 	GetCpuArchitecture() string
 	GetKernelVersion() string
 	IsAarch64() bool
+	IsX8664() bool
 	GetHostTopology() *hostapi.HostTopology
-	GetReservedCpusInfo() *cpuset.CPUSet
+	GetReservedCpusInfo() (*cpuset.CPUSet, *cpuset.CPUSet)
+	GetReservedMemMb() int
 
 	IsHugepagesEnabled() bool
 	HugepageSizeKb() int
+	IsNumaAllocateEnabled() bool
+	CpuCmtBound() float32
+	MemCmtBound() float32
 
 	IsKvmSupport() bool
 	IsNestedVirtualization() bool
@@ -69,6 +91,15 @@ type IHost interface {
 	// SyncRootPartitionUsedCapacity() error
 
 	GetKubeletConfig() kubelet.KubeletConfig
+
+	// containerd related methods
+	IsContainerHost() bool
+	GetContainerRuntimeEndpoint() string
+	GetCRI() pod.CRI
+	GetContainerCPUMap() *pod.HostContainerCPUMap
+	GetContainerCpufreqSimulateConfig() *jsonutils.JSONDict
+
+	OnCatalogChanged(catalog mcclient.KeystoneServiceCatalogV3)
 }
 
 func GetComputeSession(ctx context.Context) *mcclient.ClientSession {
@@ -109,7 +140,7 @@ func TaskComplete(ctx context.Context, params jsonutils.JSONObject) {
 
 func K8sTaskFailed(ctx context.Context, reason string) {
 	if taskId := ctx.Value(appctx.APP_CONTEXT_KEY_TASK_ID); taskId != nil {
-		k8s.KubeTasks.TaskFailed(GetK8sSession(ctx), taskId.(string), reason)
+		k8s.KubeTasks.TaskFailed2(GetK8sSession(ctx), taskId.(string), reason)
 	} else {
 		log.Errorf("Reqeuest k8s task failed missing task id, with reason(%s)", reason)
 	}
@@ -151,8 +182,16 @@ func RemoteStoragecacheCacheImage(ctx context.Context, storagecacheId, imageId, 
 		storagecacheId, imageId, query, params)
 }
 
+func UpdateResourceStatus(ctx context.Context, man modulebase.IResourceManager, id string, statusInput *apis.PerformStatusInput) (jsonutils.JSONObject, error) {
+	return man.PerformAction(GetComputeSession(ctx), id, "status", jsonutils.Marshal(statusInput))
+}
+
+func UpdateContainerStatus(ctx context.Context, cid string, statusInput *computeapi.ContainerPerformStatusInput) (jsonutils.JSONObject, error) {
+	return modules.Containers.PerformAction(GetComputeSession(ctx), cid, "status", jsonutils.Marshal(statusInput))
+}
+
 func UpdateServerStatus(ctx context.Context, sid string, statusInput *apis.PerformStatusInput) (jsonutils.JSONObject, error) {
-	return modules.Servers.PerformAction(GetComputeSession(ctx), sid, "status", jsonutils.Marshal(statusInput))
+	return UpdateResourceStatus(ctx, &modules.Servers, sid, statusInput)
 }
 
 func UpdateServerProgress(ctx context.Context, sid string, progress, progressMbps float64) (jsonutils.JSONObject, error) {

@@ -50,10 +50,15 @@ func (self *GuestStopTask) stopGuest(ctx context.Context, guest *models.SGuest) 
 		return
 	}
 	if !self.IsSubtask() {
-		guest.SetStatus(self.GetUserCred(), api.VM_STOPPING, "")
+		guest.SetStatus(ctx, self.GetUserCred(), api.VM_STOPPING, "")
 	}
 	self.SetStage("OnGuestStopTaskComplete", nil)
-	err = guest.GetDriver().RequestStopOnHost(ctx, guest, host, self, !self.IsSubtask())
+	drv, err := guest.GetDriver()
+	if err != nil {
+		self.OnGuestStopTaskCompleteFailed(ctx, guest, jsonutils.NewString(err.Error()))
+		return
+	}
+	err = drv.RequestStopOnHost(ctx, guest, host, self, !self.IsSubtask())
 	if err != nil {
 		self.OnGuestStopTaskCompleteFailed(ctx, guest, jsonutils.NewString(err.Error()))
 	}
@@ -61,11 +66,58 @@ func (self *GuestStopTask) stopGuest(ctx context.Context, guest *models.SGuest) 
 
 func (self *GuestStopTask) OnGuestStopTaskComplete(ctx context.Context, guest *models.SGuest, data jsonutils.JSONObject) {
 	db.OpsLog.LogEvent(guest, db.ACT_STOP, guest.GetShortDesc(ctx), self.UserCred)
-	models.HostManager.ClearSchedDescCache(guest.HostId)
 	if guest.Status != api.VM_READY && !self.IsSubtask() { // for kvm
-		guest.SetStatus(self.GetUserCred(), api.VM_READY, "")
+		guest.SetStatus(ctx, self.GetUserCred(), api.VM_READY, "")
+		if guest.CpuNumaPin != nil {
+			guest.SetCpuNumaPin(ctx, self.UserCred, nil, nil)
+		}
 	}
+	models.HostManager.ClearSchedDescCache(guest.HostId)
 	logclient.AddActionLogWithStartable(self, guest, logclient.ACT_VM_STOP, "success", self.UserCred, true)
+	if err := self.releaseDevices(ctx, guest); err != nil {
+		self.OnGuestStopTaskCompleteFailed(ctx, guest, jsonutils.NewString(err.Error()))
+	}
+}
+
+func (self *GuestStopTask) OnGuestStopTaskCompleteFailed(ctx context.Context, guest *models.SGuest, reason jsonutils.JSONObject) {
+	if !self.IsSubtask() {
+		guest.SetStatus(ctx, self.UserCred, api.VM_STOP_FAILED, reason.String())
+	}
+	db.OpsLog.LogEvent(guest, db.ACT_STOP_FAIL, reason.String(), self.UserCred)
+	self.SetStageFailed(ctx, reason)
+	logclient.AddActionLogWithStartable(self, guest, logclient.ACT_VM_STOP, reason.String(), self.UserCred, false)
+}
+
+func (self *GuestStopTask) releaseDevices(ctx context.Context, guest *models.SGuest) error {
+	self.SetStage("OnDevicesReleased", nil)
+	if guest.ShutdownBehavior != api.SHUTDOWN_STOP_RELEASE_GPU {
+		return self.ScheduleRun(nil)
+	}
+	devs, err := guest.GetIsolatedDevices()
+	if err != nil {
+		return errors.Wrapf(err, "GetIsolatedDevices of guest %s", guest.GetId())
+	}
+	gpus := make([]models.SIsolatedDevice, 0)
+	for _, dev := range devs {
+		if dev.IsGPU() {
+			tmpDev := dev
+			gpus = append(gpus, tmpDev)
+		}
+	}
+	if len(gpus) == 0 {
+		return self.ScheduleRun(nil)
+	}
+	if err := guest.SetReleasedIsolatedDevices(ctx, self.GetUserCred(), gpus); err != nil {
+		return errors.Wrapf(err, "SetReleasedIsolatedDevices of guest %s", guest.GetId())
+	}
+
+	if err := guest.DetachIsolatedDevices(ctx, self.GetUserCred(), gpus); err != nil {
+		return errors.Wrapf(err, "DetachIsolatedDevices of guest %s", guest.GetId())
+	}
+	return guest.StartIsolatedDevicesSyncTask(ctx, self.GetUserCred(), false, self.GetTaskId())
+}
+
+func (self *GuestStopTask) OnDevicesReleased(ctx context.Context, guest *models.SGuest, data jsonutils.JSONObject) {
 	self.SetStageComplete(ctx, nil)
 	if guest.DisableDelete.IsFalse() && guest.ShutdownBehavior == api.SHUTDOWN_TERMINATE {
 		guest.StartAutoDeleteGuestTask(ctx, self.UserCred, "")
@@ -73,13 +125,8 @@ func (self *GuestStopTask) OnGuestStopTaskComplete(ctx context.Context, guest *m
 	}
 }
 
-func (self *GuestStopTask) OnGuestStopTaskCompleteFailed(ctx context.Context, guest *models.SGuest, reason jsonutils.JSONObject) {
-	if !self.IsSubtask() {
-		guest.SetStatus(self.UserCred, api.VM_STOP_FAILED, reason.String())
-	}
-	db.OpsLog.LogEvent(guest, db.ACT_STOP_FAIL, reason.String(), self.UserCred)
-	self.SetStageFailed(ctx, reason)
-	logclient.AddActionLogWithStartable(self, guest, logclient.ACT_VM_STOP, reason.String(), self.UserCred, false)
+func (self *GuestStopTask) OnDevicesReleaseFailed(ctx context.Context, guest *models.SGuest, reason jsonutils.JSONObject) {
+	self.OnGuestStopTaskCompleteFailed(ctx, guest, reason)
 }
 
 type GuestStopAndFreezeTask struct {
@@ -89,7 +136,7 @@ type GuestStopAndFreezeTask struct {
 func (self *GuestStopAndFreezeTask) OnInit(ctx context.Context, obj db.IStandaloneModel, data jsonutils.JSONObject) {
 	guest := obj.(*models.SGuest)
 	self.SetStage("OnStopGuest", nil)
-	err := guest.StartGuestStopTask(ctx, self.UserCred, false, false, self.GetTaskId())
+	err := guest.StartGuestStopTask(ctx, self.UserCred, 60, false, false, self.GetTaskId())
 	if err != nil {
 		self.OnStopGuestFailed(ctx, guest, jsonutils.NewString(err.Error()))
 	}

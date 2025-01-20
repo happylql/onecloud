@@ -163,8 +163,23 @@ func init() {
 		return doComputeEventList(s, &nargs)
 	})
 
+	R(&TypeEventListOptions{}, "container-event", "Show operation event logs of container", func(s *mcclient.ClientSession, args *TypeEventListOptions) error {
+		nargs := EventListOptions{BaseEventListOptions: args.BaseEventListOptions, Id: args.ID, Type: []string{"container"}}
+		return doComputeEventList(s, &nargs)
+	})
+
 	R(&TypeEventListOptions{}, "disk-event", "Show operation event logs of disk", func(s *mcclient.ClientSession, args *TypeEventListOptions) error {
 		nargs := EventListOptions{BaseEventListOptions: args.BaseEventListOptions, Id: args.ID, Type: []string{"disk"}}
+		return doComputeEventList(s, &nargs)
+	})
+
+	R(&TypeEventListOptions{}, "dbinstance-event", "Show operation event logs of disk", func(s *mcclient.ClientSession, args *TypeEventListOptions) error {
+		nargs := EventListOptions{BaseEventListOptions: args.BaseEventListOptions, Id: args.ID, Type: []string{"dbinstance"}}
+		return doComputeEventList(s, &nargs)
+	})
+
+	R(&TypeEventListOptions{}, "lb-event", "Show operation event logs of disk", func(s *mcclient.ClientSession, args *TypeEventListOptions) error {
+		nargs := EventListOptions{BaseEventListOptions: args.BaseEventListOptions, Id: args.ID, Type: []string{"loadbalancer"}}
 		return doComputeEventList(s, &nargs)
 	})
 

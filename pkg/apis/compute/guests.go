@@ -23,6 +23,7 @@ import (
 
 	"yunion.io/x/onecloud/pkg/apis"
 	"yunion.io/x/onecloud/pkg/apis/billing"
+	"yunion.io/x/onecloud/pkg/apis/host"
 	imageapi "yunion.io/x/onecloud/pkg/apis/image"
 	"yunion.io/x/onecloud/pkg/httperrors"
 )
@@ -57,12 +58,12 @@ type ServerListInput struct {
 	// 只列出还有备份机的主机
 	Backup *bool `json:"bakcup"`
 	// 列出指定类型的主机
-	// enum: normal,gpu,usb,backup
+	// enum: ["normal","gpu","usb","backup"]
 	ServerType []string `json:"server_type"`
 	// 列出管理安全组为指定安全组的主机
 	AdminSecgroup string `json:"admin_security"`
 	// 列出Hypervisor为指定值的主机
-	// enum: kvm,esxi,baremetal,aliyun,azure,aws,huawei,ucloud,zstack,openstack,google,ctyun,cloudpods,ecloud,jdcloud,remotefile`
+	// enum: ["kvm","esxi","baremetal","aliyun","azure","aws","huawei","ucloud","zstack","openstack","google","ctyun","cloudpods","ecloud","jdcloud","remotefile"]
 	Hypervisor []string `json:"hypervisor"`
 	// 列出绑定了弹性IP（EIP）的主机
 	WithEip *bool `json:"with_eip"`
@@ -71,13 +72,13 @@ type ServerListInput struct {
 	// 列出可绑定弹性IP的主机
 	EipAssociable *bool `json:"eip_associable"`
 	// 列出操作系统为指定值的主机
-	// enum: linux,windows,vmware
+	// enum: ["linux","windows","vmware"]
 	OsType []string `json:"os_type"`
 	// 操作系统发行版
 	OsDist []string `json:"os_dist"`
 
 	// 对列表结果按照磁盘大小进行排序
-	// enum: asc,desc
+	// enum: ["asc","desc"]
 	OrderByDisk string `json:"order_by_disk"`
 
 	OrderByIp string `json:"order_by_ip"`
@@ -96,7 +97,7 @@ type ServerListInput struct {
 	Disk string `json:"disk" yunion-deprecated-by:"attachable_servers_for_disk"`
 
 	// 按主机资源类型进行排序
-	// enum: shared,prepaid,dedicated
+	// enum: ["shared","prepaid","dedicated"]
 	ResourceType string `json:"resource_type"`
 	// 返回该宿主机上的所有虚拟机，包括备份机
 	GetAllGuestsOnHost string `json:"get_all_guests_on_host"`
@@ -190,18 +191,11 @@ type ServerDetails struct {
 	// 系统管理员可见的安全组规则
 	AdminSecurityRules string `json:"admin_security_rules"`
 
-	// list
-	AttachTime time.Time `json:"attach_time"`
-
 	// common
 	IsPrepaidRecycle bool `json:"is_prepaid_recycle"`
 
-	// 备份主机所在宿主机名称
-	BackupHostName string `json:"backup_host_name"`
-	// 备份主机所在宿主机状态
-	BackupHostStatus string `json:"backup_host_status"`
-	// 主备机同步状态
-	BackupGuestSyncStatus string `json:"backup_guest_sync_status"`
+	// 主备机信息
+	BackupInfo
 
 	// 是否可以回收
 	CanRecycle bool `json:"can_recycle"`
@@ -273,6 +267,25 @@ type ServerDetails struct {
 
 	// 监控上报URL
 	MonitorUrl string `json:"monitor_url"`
+
+	// 容器描述信息
+	Containers []*PodContainerDesc `json:"containers"`
+}
+
+type BackupInfo struct {
+	// 备份主机所在宿主机名称
+	BackupHostName string `json:"backup_host_name"`
+	// 备份主机所在宿主机状态
+	BackupHostStatus string `json:"backup_host_status"`
+	// 主备机同步状态
+	BackupGuestSyncStatus string `json:"backup_guest_sync_status"`
+}
+
+type PodContainerDesc struct {
+	Id     string `json:"id"`
+	Name   string `json:"name"`
+	Image  string `json:"image"`
+	Status string `json:"status"`
 }
 
 type Floppy struct {
@@ -283,6 +296,7 @@ type Floppy struct {
 type Cdrom struct {
 	Ordinal   int    `json:"ordinal"`
 	Detail    string `json:"detail"`
+	Name      string `json:"name"`
 	BootIndex int8   `json:"boot_index"`
 }
 
@@ -345,24 +359,25 @@ func (self ServerDetails) GetMetricPairs() map[string]string {
 
 // GuestDiskInfo describe the information of disk on the guest.
 type GuestDiskInfo struct {
-	Id          string `json:"id"`
-	Name        string `json:"name"`
-	FsFormat    string `json:"fs,omitempty"`
-	DiskType    string `json:"disk_type"`
-	Index       int8   `json:"index"`
-	BootIndex   int8   `json:"boot_index"`
-	SizeMb      int    `json:"size"`
-	DiskFormat  string `json:"disk_format"`
-	Driver      string `json:"driver"`
-	CacheMode   string `json:"cache_mode"`
-	AioMode     string `json:"aio_mode"`
-	MediumType  string `json:"medium_type"`
-	StorageType string `json:"storage_type"`
-	Iops        int    `json:"iops"`
-	Bps         int    `json:"bps"`
-	ImageId     string `json:"image_id,omitempty"`
-	Image       string `json:"image,omitemtpy"`
-	StorageId   string `json:"storage_id"`
+	Id            string `json:"id"`
+	Name          string `json:"name"`
+	FsFormat      string `json:"fs,omitempty"`
+	DiskType      string `json:"disk_type"`
+	Index         int8   `json:"index"`
+	BootIndex     int8   `json:"boot_index"`
+	SizeMb        int    `json:"size"`
+	DiskFormat    string `json:"disk_format"`
+	Driver        string `json:"driver"`
+	CacheMode     string `json:"cache_mode"`
+	AioMode       string `json:"aio_mode"`
+	MediumType    string `json:"medium_type"`
+	StorageType   string `json:"storage_type"`
+	Iops          int    `json:"iops"`
+	Bps           int    `json:"bps"`
+	ImageId       string `json:"image_id,omitempty"`
+	Image         string `json:"image,omitemtpy"`
+	StorageId     string `json:"storage_id"`
+	Preallocation string `json:"preallocation"`
 }
 
 func (self GuestDiskInfo) ShortDesc() string {
@@ -468,6 +483,13 @@ type ConvertToKvmInput struct {
 
 	// dest guest network configs
 	Networks []*NetworkConfig `json:"networks"`
+
+	// deploy telegraf after convert
+	DeployTelegraf bool `json:"deploy_telegraf"`
+}
+
+type BatchConvertToKvmCheckInput struct {
+	GuestIds []string `json:"guest_ids"`
 }
 
 type GuestSaveToTemplateInput struct {
@@ -609,6 +631,9 @@ type ServerStopInput struct {
 	// 是否强制关机
 	IsForce bool `json:"is_force"`
 
+	// 关机等待时间，如果是强制关机，则等待时间为0，如果不设置，默认为30秒
+	TimeoutSecs int `json:"timeout_secs"`
+
 	// 是否关机停止计费, 若平台不支持停止计费，此参数无作用
 	// 目前仅阿里云，腾讯云此参数生效
 	StopCharging bool `json:"stop_charging"`
@@ -678,6 +703,14 @@ type ServerDetachnetworkInput struct {
 	IpAddr string `json:"ip_addr"`
 	// 通过Mac解绑网卡, 优先级低于ip_addr
 	Mac string `json:"mac"`
+	// 解绑后不立即同步配置
+	DisableSyncConfig *bool `json:"disable_sync_config"`
+	// 强制卸载，无论虚拟机的状态，仅更新数据库
+	Force *bool `json:"force"`
+}
+
+func (input ServerDetachnetworkInput) IsForce() bool {
+	return input.Force != nil && *input.Force
 }
 
 type ServerMigrateForecastInput struct {
@@ -689,6 +722,7 @@ type ServerMigrateForecastInput struct {
 	SkipKernelCheck bool   `json:"skip_kernel_check"`
 	ConvertToKvm    bool   `json:"convert_to_kvm"`
 	IsRescueMode    bool   `json:"is_rescue_mode"`
+	ResetCpuNumaPin bool   `json:"reset_cpu_numa_pin"`
 }
 
 type ServerResizeDiskInput struct {
@@ -733,6 +767,13 @@ type ServerDeployInputBase struct {
 	ResetPassword bool `json:"reset_password"`
 	// 重置指定密码
 	Password string `json:"password"`
+	// 用户自定义启动脚本
+	// 支持 #cloud-config yaml 格式及shell脚本
+	// 支持特殊user data平台: Aliyun, Qcloud, Azure, Apsara, Ucloud
+	// required: false
+	UserData string `json:"user_data"`
+	// swagger: ignore
+	LoginAccount string `json:"login_account"`
 
 	// swagger: ignore
 	Restart bool `json:"restart"`
@@ -771,15 +812,21 @@ type ServerChangeConfigInput struct {
 	Flavor string `json:"flavor" yunion-deprecated-by:"instance_type"`
 
 	// cpu卡槽数
+	// vmware 若开机调整配置时,需要保证调整前及调整后 vcpu_count / cpu_sockets 保持不变
+	// vmware开机调整配置同样需要注意 https://kb.vmware.com/s/article/2008405
 	CpuSockets *int `json:"cpu_sockets"`
+
 	// cpu大小
 	VcpuCount *int `json:"vcpu_count"`
+	// 任务分配CPU大小
+	ExtraCpuCount *int `json:"extra_cpu_count"`
 	// 内存大小, 1024M, 1G
 	VmemSize string `json:"vmem_size"`
 
 	// 调整完配置后是否自动启动
 	AutoStart bool `json:"auto_start"`
 
+	// disks start from index 1, i.e. cannot change size of system disk(1st disk)
 	Disks []DiskConfig `json:"disks"`
 
 	SetTrafficLimits   []ServerNicTrafficLimit
@@ -830,8 +877,14 @@ type GuestJsonDesc struct {
 	IsSlave        *bool  `json:"is_slave"`
 	IsVolatileHost bool   `json:"is_volatile_host"`
 	HostId         string `json:"host_id"`
+	// 宿主机管理IP
+	HostAccessIp string `json:"host_access_ip"`
+	// 宿主机公网IP（如果有）
+	HostEIP string `json:"host_eip"`
 
 	IsolatedDevices []*IsolatedDeviceJsonDesc `json:"isolated_devices"`
+
+	CpuNumaPin []SCpuNumaPin `json:"cpu_numa_pin"`
 
 	Domain string `json:"domain"`
 
@@ -881,12 +934,29 @@ type GuestJsonDesc struct {
 		InstanceSnapshotId string `json:"instance_snapshot_id"`
 		InstanceId         string `json:"instance_id"`
 	} `json:"instance_snapshot_info"`
+	EnableEsxiSwap bool `json:"enable_esxi_swap"`
 
 	EncryptKeyId string `json:"encrypt_key_id,omitempty"`
 
 	IsDaemon bool `json:"is_daemon"`
 
 	LightMode bool `json:"light_mode"`
+
+	Hypervisor string                `json:"hypervisor"`
+	Containers []*host.ContainerDesc `json:"containers"`
+}
+
+type SVCpuPin struct {
+	Vcpu int
+	Pcpu int
+}
+
+type SCpuNumaPin struct {
+	SizeMB *int `json:"size_mb"`
+	NodeId int  `json:"node_id"`
+
+	VcpuPin       []SVCpuPin `json:"vcpu_pin"`
+	ExtraCpuCount int        `json:"extra_cpu_count"`
 }
 
 type ServerSetBootIndexInput struct {
@@ -978,6 +1048,10 @@ type ServerSnapshotAndCloneInput struct {
 
 	// ignore
 	InstanceSnapshotId string `json:"instance_snapshot_id"`
+
+	// Perfer clone destination host
+	// 指定期望的迁移目标宿主机
+	PreferHostId string `json:"prefer_host_id"`
 }
 
 type ServerInstanceSnapshot struct {
@@ -1154,15 +1228,25 @@ type ServerNicTrafficLimit struct {
 	TxTrafficLimit *int64 `json:"tx_traffic_limit"`
 }
 
-type GuestAddSubIpsInput struct {
-	Mac    string   `json:"mac"`
-	IpAddr string   `json:"ip_addr"`
+type GuestAddSubIpsInfo struct {
 	Count  int      `json:"count"`
 	SubIps []string `json:"sub_ips"`
 
 	Reserved bool `json:"reserved"`
 
 	AllocDir IPAllocationDirection `json:"alloc_dir"`
+}
+
+type GuestAddSubIpsInput struct {
+	ServerNetworkInfo
+
+	GuestAddSubIpsInfo
+}
+
+type GuestUpdateSubIpsInput struct {
+	GuestAddSubIpsInput
+
+	RemoveSubIps []string `json:"remove_sub_ips"`
 }
 
 type NetworkAddrConf struct {
@@ -1198,4 +1282,117 @@ type ServerSetOSInfoInput struct {
 	Distribution string `json:"distribution" help:"OS distribution, e.g.: CentOS, Ubuntu, Windows Server 2016 Datacenter"`
 	// OS version, e.g: 7.9, 22.04, 6.3
 	Version string `json:"version" help:"OS version, e.g.: 7.9, 22.04, 6.3"`
+	Arch    string `json:"arch" help:"OS arch, e.g.: x86_64, aarch64"`
+}
+
+type ServerNetworkInfo struct {
+	Index   int    `json:"index"`
+	Mac     string `json:"mac"`
+	IpAddr  string `json:"ip_addr"`
+	Ip6Addr string `json:"ip6_addr"`
+}
+
+type ServerChangeIpaddrInput struct {
+	ServerNetworkInfo
+
+	NetDesc string         `json:"net_desc"`
+	NetConf *NetworkConfig `json:"net_conf"`
+
+	Reserve *bool `json:"reserve"`
+
+	RestartNetwork *bool `json:"restart_network"`
+}
+
+type ServerChangeBandwidthInput struct {
+	ServerNetworkInfo
+
+	Bandwidth int `json:"bandwidth"`
+
+	NoSync *bool `json:"no_sync"`
+}
+
+type ServerChangeConfigSpecs struct {
+	CpuSockets    int    `json:"cpu_sockets"`
+	VcpuCount     int    `json:"vcpu_count"`
+	ExtraCpuCount int    `json:"extra_cpu_count"`
+	VmemSize      int    `json:"vmem_size"`
+	InstanceType  string `json:"instance_type"`
+}
+
+type DiskResizeSpec struct {
+	DiskId    string
+	SizeMb    int
+	OldSizeMb int
+}
+
+type ServerChangeConfigSettings struct {
+	Old ServerChangeConfigSpecs `json:"old"`
+
+	ServerChangeConfigSpecs
+
+	InstanceTypeFamily string `json:"instance_type_family"`
+	// disks to resize
+	Resize []*DiskResizeSpec `json:"resize"`
+	// disks to create
+	Create []*DiskConfig `json:"create"`
+
+	AutoStart   bool `json:"auto_start"`
+	GuestOnline bool `json:"guest_online"`
+
+	SetTrafficLimits   []ServerNicTrafficLimit `json:"set_traffic_limits"`
+	ResetTrafficLimits []ServerNicTrafficLimit `json:"reset_traffic_limits"`
+
+	SchedDesc jsonutils.JSONObject `json:"sched_desc"`
+}
+
+func (conf ServerChangeConfigSettings) CpuChanged() bool {
+	return conf.VcpuCount != conf.Old.VcpuCount
+}
+
+func (conf ServerChangeConfigSettings) AddedCpu() int {
+	addCpu := conf.VcpuCount - conf.Old.VcpuCount
+	if addCpu < 0 {
+		addCpu = 0
+	}
+	return addCpu
+}
+
+func (conf ServerChangeConfigSettings) ExtraCpuChanged() bool {
+	return conf.ExtraCpuCount != conf.Old.ExtraCpuCount
+}
+
+func (conf ServerChangeConfigSettings) AddedExtraCpu() int {
+	addCpu := conf.ExtraCpuCount - conf.Old.ExtraCpuCount
+	if addCpu < 0 {
+		addCpu = 0
+	}
+	return addCpu
+}
+
+func (conf ServerChangeConfigSettings) MemChanged() bool {
+	return conf.VmemSize != conf.Old.VmemSize
+}
+
+func (conf ServerChangeConfigSettings) AddedMem() int {
+	addMem := conf.VmemSize - conf.Old.VmemSize
+	if addMem < 0 {
+		addMem = 0
+	}
+	return addMem
+}
+
+func (conf ServerChangeConfigSettings) AddedDisk() int {
+	var size int
+	for _, resize := range conf.Resize {
+		size += resize.SizeMb - resize.OldSizeMb
+	}
+	for _, create := range conf.Create {
+		size += create.SizeMb
+	}
+	return size
+}
+
+type ServerReleasedIsolatedDevice struct {
+	DevType string `json:"dev_type"`
+	Model   string `json:"model"`
 }

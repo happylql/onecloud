@@ -21,6 +21,7 @@ import (
 
 	"yunion.io/x/cloudmux/pkg/cloudprovider"
 	"yunion.io/x/pkg/errors"
+	"yunion.io/x/pkg/util/netutils"
 	"yunion.io/x/pkg/util/secrules"
 )
 
@@ -101,18 +102,20 @@ func (self *SecurityGroupRule) Delete() error {
 	return self.secgroup.region.DeleteSecurityGroupRule(self.Id)
 }
 
+// https://console.huaweicloud.com/apiexplorer/#/openapi/VPC/doc?version=v3&api=DeleteSecurityGroupRule
 func (self *SRegion) DeleteSecurityGroupRule(id string) error {
-	_, err := self.delete(SERVICE_VPC, "vpc/security-group-rules/"+id)
+	_, err := self.delete(SERVICE_VPC_V3, "vpc/security-group-rules/"+id)
 	return err
 }
 
+// https://console.huaweicloud.com/apiexplorer/#/openapi/VPC/doc?version=v3&api=ListSecurityGroupRules
 func (self *SRegion) GetSecurityGroupRules(groupId string) ([]SecurityGroupRule, error) {
 	params := url.Values{}
 	params.Set("security_group_id", groupId)
 
 	ret := []SecurityGroupRule{}
 	for {
-		resp, err := self.list(SERVICE_VPC, "vpc/security-group-rules", params)
+		resp, err := self.list(SERVICE_VPC_V3, "vpc/security-group-rules", params)
 		if err != nil {
 			return nil, err
 		}
@@ -133,6 +136,7 @@ func (self *SRegion) GetSecurityGroupRules(groupId string) ([]SecurityGroupRule,
 	return ret, nil
 }
 
+// https://console.huaweicloud.com/apiexplorer/#/openapi/VPC/doc?version=v3&api=CreateSecurityGroupRule
 func (self *SRegion) CreateSecurityGroupRule(groupId string, opts *cloudprovider.SecurityGroupRuleCreateOptions) (*SecurityGroupRule, error) {
 	rule := map[string]interface{}{
 		"security_group_id": groupId,
@@ -145,6 +149,9 @@ func (self *SRegion) CreateSecurityGroupRule(groupId string, opts *cloudprovider
 	}
 	if len(opts.CIDR) > 0 {
 		rule["remote_ip_prefix"] = opts.CIDR
+		if _, err := netutils.NewIPV6Prefix(opts.CIDR); err == nil {
+			rule["ethertype"] = "IPv6"
+		}
 	}
 	if opts.Action == secrules.SecurityRuleDeny {
 		rule["action"] = "deny"
@@ -161,7 +168,7 @@ func (self *SRegion) CreateSecurityGroupRule(groupId string, opts *cloudprovider
 	params := map[string]interface{}{
 		"security_group_rule": rule,
 	}
-	resp, err := self.post(SERVICE_VPC, "vpc/security-group-rules", params)
+	resp, err := self.post(SERVICE_VPC_V3, "vpc/security-group-rules", params)
 	if err != nil {
 		return nil, errors.Wrapf(err, "create rule")
 	}

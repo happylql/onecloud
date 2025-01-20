@@ -48,6 +48,10 @@ func (self *SESXiHostDriver) GetHypervisor() string {
 	return api.HYPERVISOR_ESXI
 }
 
+func (self *SESXiHostDriver) GetProvider() string {
+	return api.CLOUD_PROVIDER_ONECLOUD
+}
+
 func (self *SESXiHostDriver) ValidateDiskSize(storage *models.SStorage, sizeGb int) error {
 	return nil
 }
@@ -129,7 +133,7 @@ func (self *SESXiHostDriver) CheckAndSetCacheImage(ctx context.Context, userCred
 				return errors.Wrap(err, "srcHostCacheImage.GetHost")
 			}
 		} else {
-			host, err = storageCache.GetHost()
+			host, err = storageCache.GetMasterHost()
 			if err != nil {
 				return errors.Wrap(err, "StorageCache.GetHost")
 			}

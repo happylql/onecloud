@@ -25,17 +25,17 @@ import (
 type ComputeOptions struct {
 	PortV2 int `help:"Listening port for region V2"`
 
-	DNSServer    string   `help:"Address of DNS server"`
-	DNSDomain    string   `help:"Domain suffix for virtual servers"`
-	DNSResolvers []string `help:"Upstream DNS resolvers"`
+	DNSServer    string   `help:"Address of DNS server" json:"dns_server"`
+	DNSDomain    string   `help:"Domain suffix for virtual servers" json:"dns_domain"`
+	DNSResolvers []string `help:"Upstream DNS resolvers" json:"dns_resolvers"`
+	// EnableDefaultDNS bool     `help:"Enable default DNS if dns server not specific" default:"true"`
 
 	DefaultCPUOvercommitBound     float32 `default:"8.0" help:"Default cpu overcommit bound for host, default to 8"`
 	DefaultMemoryOvercommitBound  float32 `default:"1.0" help:"Default memory overcommit bound for host, default to 1"`
 	DefaultStorageOvercommitBound float32 `default:"1.0" help:"Default storage overcommit bound for storage, default to 1"`
 
-	DefaultSecurityGroupId       string `help:"Default security rules" default:"default"`
-	DefaultAdminSecurityGroupId  string `help:"Default admin security rules" default:""`
-	CleanUselessKvmSecurityGroup bool   `help:"Clean useless kvm security groups when service start"`
+	DefaultSecurityGroupId      string `help:"Default security rules" default:"default"`
+	DefaultAdminSecurityGroupId string `help:"Default admin security rules" default:""`
 
 	DefaultDiskSizeMB int `default:"10240" help:"Default disk size in MB if not specified, default to 10GiB" json:"default_disk_size"`
 
@@ -99,17 +99,15 @@ type ComputeOptions struct {
 	BaremetalPreparePackageUrl string `help:"Baremetal online register package"`
 
 	// snapshot options
-	AutoSnapshotDay               int `default:"1" help:"Days auto snapshot disks, default 1 day"`
-	AutoSnapshotHour              int `default:"2" help:"What hour take sanpshot, default 02:00"`
-	DefaultMaxSnapshotCount       int `default:"9" help:"Per Disk max snapshot count, default 9"`
-	DefaultMaxManualSnapshotCount int `default:"2" help:"Per Disk max manual snapshot count, default 2"`
+	AutoSnapshotDay  int `default:"1" help:"Days auto snapshot disks, default 1 day"`
+	AutoSnapshotHour int `default:"2" help:"What hour take sanpshot, default 02:00"`
 
 	//snapshot policy options
-	RetentionDaysLimit  int `default:"49" help:"Days of snapshot retention, default 49 days"`
-	TimePointsLimit     int `default:"1" help:"time point of every days, default 1 point"`
-	RepeatWeekdaysLimit int `default:"7" help:"day point of every weekday, default 7 points"`
+	RetentionDaysLimit int `default:"49" help:"Days of snapshot retention, default 49 days"`
+	TimePointsLimit    int `default:"1" help:"time point of every days, default 1 point"`
 
 	ServerStatusSyncIntervalMinutes int `default:"5" help:"Interval to sync server status, defualt is 5 minutes"`
+	CloudAccountBatchSyncSize       int `default:"10" help:"How many cloud account syncing in a batch"`
 
 	ServerSkuSyncIntervalMinutes int `default:"60" help:"Interval to sync public cloud server skus, defualt is 1 hour"`
 	SkuBatchSync                 int `default:"5" help:"How many skus can be sync in a batch"`
@@ -125,6 +123,7 @@ type ComputeOptions struct {
 	// cloud image sync
 	CloudImagesSyncIntervalHours int `default:"3" help:"Interval to sync public cloud image, defualt is 3 hour"`
 
+	// 由云管(Cloudpods)负责分配IP地址，默认为false。默认是由对应具备IPAM能力的云平台自主分配IP地址
 	EnablePreAllocateIpAddr bool `help:"Enable private and public cloud private ip pre allocate, default false" default:"false"`
 
 	// 创建虚拟机失败后, 自动使用其他相同配置套餐
@@ -143,7 +142,7 @@ type ComputeOptions struct {
 
 	CloudSyncWorkerCount         int `help:"how many current synchronization threads" default:"5"`
 	CloudProviderSyncWorkerCount int `help:"how many current providers synchronize their regions, practically no limit" default:"10"`
-	CloudAutoSyncIntervalSeconds int `help:"frequency to check auto sync tasks" default:"30"`
+	CloudAutoSyncIntervalSeconds int `help:"frequency to check auto sync tasks" default:"300"`
 	DefaultSyncIntervalSeconds   int `help:"minimal synchronization interval, default 15 minutes" default:"900"`
 	MaxCloudAccountErrorCount    int `help:"maximal consecutive error count allow for a cloud account" default:"5"`
 
@@ -167,9 +166,8 @@ type ComputeOptions struct {
 	SyncStorageCapacityUsedIntervalMinutes int  `help:"interval sync storage capacity used" default:"20"`
 	LockStorageFromCachedimage             bool `help:"must use storage in where selected cachedimage when creating vm"`
 
-	SyncExtDiskSnapshotIntervalMinutes int  `help:"sync snapshot for external disk" default:"20"`
-	AutoReconcileBackupServers         bool `help:"auto reconcile backup servers" default:"false"`
-	SetKVMServerAsDaemonOnCreate       bool `help:"set kvm guest as daemon server on create" default:"false"`
+	AutoReconcileBackupServers   bool `help:"auto reconcile backup servers" default:"false"`
+	SetKVMServerAsDaemonOnCreate bool `help:"set kvm guest as daemon server on create" default:"false"`
 
 	SCapabilityOptions
 	SASControllerOptions
@@ -222,7 +220,12 @@ type ComputeOptions struct {
 
 	ResourceExpiredNotifyDays []int `help:"The notify of resource expired" default:"1,3,30"`
 
+	SkipSyncHostConfigInfoProviders    string `help:"Skip sync host cpu and mem config by provider"`
+	SkipSyncStorageConfigInfoProviders string `help:"Skip sync storage capacity and media type config by provider"`
+
 	esxi.EsxiOptions
+
+	NetworkAlwaysManualConfig bool `help:"always manually configure network settings" default:"false"`
 }
 
 type SCapabilityOptions struct {

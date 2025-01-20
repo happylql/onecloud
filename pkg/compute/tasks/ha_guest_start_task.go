@@ -51,10 +51,16 @@ func (self *HAGuestStartTask) OnInit(
 func (self *HAGuestStartTask) RequestStopBackupGuest(ctx context.Context, guest *models.SGuest) {
 	host := models.HostManager.FetchHostById(guest.BackupHostId)
 	self.SetStage("OnBackupGuestStopComplete", nil)
-	guest.SetStatus(self.UserCred, api.VM_BACKUP_STOPING, "HAGuestStartTask")
-	err := guest.GetDriver().RequestStopOnHost(ctx, guest, host, self, false)
+	guest.SetStatus(ctx, self.UserCred, api.VM_BACKUP_STOPING, "HAGuestStartTask")
+	drv, err := guest.GetDriver()
 	if err != nil {
-		guest.SetStatus(self.UserCred, api.VM_BACKUP_START_FAILED, err.Error())
+		guest.SetStatus(ctx, self.UserCred, api.VM_BACKUP_START_FAILED, err.Error())
+		self.SetStageFailed(ctx, nil)
+		return
+	}
+	err = drv.RequestStopOnHost(ctx, guest, host, self, false)
+	if err != nil {
+		guest.SetStatus(ctx, self.UserCred, api.VM_BACKUP_START_FAILED, err.Error())
 		self.SetStageFailed(ctx, nil)
 	}
 }
@@ -69,14 +75,14 @@ func (self *HAGuestStartTask) OnBackupGuestStopComplete(
 func (self *HAGuestStartTask) OnBackupGuestStopCompleteFailed(
 	ctx context.Context, guest *models.SGuest, data jsonutils.JSONObject,
 ) {
-	guest.SetStatus(self.UserCred, api.VM_BACKUP_START_FAILED, data.String())
+	guest.SetStatus(ctx, self.UserCred, api.VM_BACKUP_START_FAILED, data.String())
 	self.SetStageFailed(ctx, data)
 }
 
 func (self *HAGuestStartTask) RequestStartBacking(ctx context.Context, guest *models.SGuest) {
 	self.SetStage("OnStartBackupGuestComplete", nil)
 	host := models.HostManager.FetchHostById(guest.BackupHostId)
-	guest.SetStatus(self.UserCred, api.VM_BACKUP_STARTING, "")
+	guest.SetStatus(ctx, self.UserCred, api.VM_BACKUP_STARTING, "")
 
 	if !guest.IsGuestBackupMirrorJobReady(ctx, self.UserCred) {
 		hostMaster := models.HostManager.FetchHostById(guest.HostId)
@@ -87,7 +93,13 @@ func (self *HAGuestStartTask) RequestStartBacking(ctx context.Context, guest *mo
 		self.Params.Set("block_ready", jsonutils.JSONTrue)
 	}
 
-	err := guest.GetDriver().RequestStartOnHost(ctx, guest, host, self.UserCred, self)
+	drv, err := guest.GetDriver()
+	if err != nil {
+		self.OnStartCompleteFailed(ctx, guest, jsonutils.NewString(err.Error()))
+		return
+	}
+
+	err = drv.RequestStartOnHost(ctx, guest, host, self.UserCred, self)
 	if err != nil {
 		self.OnStartCompleteFailed(ctx, guest, jsonutils.NewString(err.Error()))
 		return
@@ -126,7 +138,13 @@ func (self *HAGuestStartTask) OnStartBackupGuestCompleteFailed(
 
 func (self *HAGuestStartTask) OnStartComplete(ctx context.Context, guest *models.SGuest, data jsonutils.JSONObject) {
 	if !guest.IsGuestBackupMirrorJobReady(ctx, self.UserCred) {
-		if err := guest.GetDriver().RequestSlaveBlockStreamDisks(ctx, guest, self); err != nil {
+		drv, err := guest.GetDriver()
+		if err != nil {
+			guest.SetGuestBackupMirrorJobFailed(ctx, self.UserCred)
+			guest.SetBackupGuestStatus(self.UserCred, api.VM_BLOCK_STREAM_FAIL, err.Error())
+			return
+		}
+		if err := drv.RequestSlaveBlockStreamDisks(ctx, guest, self); err != nil {
 			guest.SetGuestBackupMirrorJobFailed(ctx, self.UserCred)
 			guest.SetBackupGuestStatus(self.UserCred, api.VM_BLOCK_STREAM_FAIL, err.Error())
 		} else {

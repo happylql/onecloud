@@ -16,6 +16,7 @@ package db
 
 import (
 	"context"
+	"database/sql"
 
 	"yunion.io/x/jsonutils"
 	"yunion.io/x/log"
@@ -110,6 +111,27 @@ func (manager *SVirtualResourceBaseManager) GetPropertyStatistics(ctx context.Co
 		})
 	}
 	return result, nil
+}
+
+func (manager *SVirtualResourceBaseManager) CustomizedTotalCount(ctx context.Context, userCred mcclient.TokenCredential, query jsonutils.JSONObject, totalQ *sqlchemy.SQuery) (int, jsonutils.JSONObject, error) {
+	results := struct {
+		apis.TotalCountBase
+		StatusInfo []apis.StatusStatisticStatusInfo
+	}{}
+
+	err := totalQ.First(&results.TotalCountBase)
+	if err != nil && errors.Cause(err) != sql.ErrNoRows {
+		return -1, nil, errors.Wrapf(err, "First")
+	}
+
+	totalSQ := totalQ.ResetFields().SubQuery()
+	statQ := totalSQ.Query(totalSQ.Field("status"), sqlchemy.COUNT("total_count", totalSQ.Field("id")), sqlchemy.SUM("pending_deleted_count", totalSQ.Field("pending_deleted")))
+	statQ = statQ.GroupBy(totalSQ.Field("status"))
+	err = statQ.All(&results.StatusInfo)
+	if err != nil {
+		return -1, nil, errors.Wrapf(err, "status query")
+	}
+	return results.Count, jsonutils.Marshal(results), nil
 }
 
 func (manager *SVirtualResourceBaseManager) GetPropertyProjectStatistics(ctx context.Context, userCred mcclient.TokenCredential, query jsonutils.JSONObject) ([]apis.ProjectStatistic, error) {
@@ -213,12 +235,12 @@ func (manager *SVirtualResourceBaseManager) FilterBySystemAttributes(q *sqlchemy
 	return q
 }
 
-func (manager *SVirtualResourceBaseManager) FetchByName(userCred mcclient.IIdentityProvider, idStr string) (IModel, error) {
-	return FetchByName(manager, userCred, idStr)
+func (manager *SVirtualResourceBaseManager) FetchByName(ctx context.Context, userCred mcclient.IIdentityProvider, idStr string) (IModel, error) {
+	return FetchByName(ctx, manager, userCred, idStr)
 }
 
-func (manager *SVirtualResourceBaseManager) FetchByIdOrName(userCred mcclient.IIdentityProvider, idStr string) (IModel, error) {
-	return FetchByIdOrName(manager, userCred, idStr)
+func (manager *SVirtualResourceBaseManager) FetchByIdOrName(ctx context.Context, userCred mcclient.IIdentityProvider, idStr string) (IModel, error) {
+	return FetchByIdOrName(ctx, manager, userCred, idStr)
 }
 
 func (manager *SVirtualResourceBaseManager) ValidateCreateData(ctx context.Context, userCred mcclient.TokenCredential, ownerId mcclient.IIdentityProvider, query jsonutils.JSONObject, input apis.VirtualResourceCreateInput) (apis.VirtualResourceCreateInput, error) {
@@ -379,16 +401,18 @@ func (model *SVirtualResourceBase) PerformChangeOwner(ctx context.Context, userC
 		return nil, errors.Wrap(err, "objectConfirmPolicyTags")
 	}
 
-	q := manager.Query().Equals("name", model.GetName())
-	q = manager.FilterByOwner(q, manager, userCred, ownerId, manager.NamespaceScope())
-	q = manager.FilterBySystemAttributes(q, nil, nil, manager.ResourceScope())
-	q = q.NotEquals("id", model.GetId())
-	cnt, err := q.CountWithError()
-	if err != nil {
-		return nil, httperrors.NewInternalServerError("check name duplication error: %s", err)
-	}
-	if cnt > 0 {
-		return nil, httperrors.NewDuplicateNameError("name", model.GetName())
+	if !consts.GetChangeOwnerAutoRename() {
+		q := manager.Query().Equals("name", model.GetName())
+		q = manager.FilterByOwner(ctx, q, manager, userCred, ownerId, manager.NamespaceScope())
+		q = manager.FilterBySystemAttributes(q, nil, nil, manager.ResourceScope())
+		q = q.NotEquals("id", model.GetId())
+		cnt, err := q.CountWithError()
+		if err != nil {
+			return nil, httperrors.NewInternalServerError("check name duplication error: %s", err)
+		}
+		if cnt > 0 {
+			return nil, httperrors.NewDuplicateNameError("name", model.GetName())
+		}
 	}
 	former, _ := TenantCacheManager.FetchTenantById(ctx, model.ProjectId)
 	if former == nil {
@@ -428,7 +452,12 @@ func (model *SVirtualResourceBase) PerformChangeOwner(ctx context.Context, userC
 	// cancel usage
 	model.cleanModelUsages(ctx, userCred)
 
+	oldName := model.Name
 	_, err = Update(model, func() error {
+		model.Name, err = GenerateName(ctx, manager, ownerId, oldName)
+		if err != nil {
+			return err
+		}
 		model.DomainId = ownerId.GetProjectDomainId()
 		model.ProjectId = ownerId.GetProjectId()
 		model.ProjectSrc = string(apis.OWNER_SOURCE_LOCAL)
@@ -436,6 +465,10 @@ func (model *SVirtualResourceBase) PerformChangeOwner(ctx context.Context, userC
 	})
 	if err != nil {
 		return nil, errors.Wrap(err, "Update")
+	}
+
+	if oldName != model.Name {
+		model.SetMetadata(ctx, "old_name", oldName, userCred)
 	}
 
 	// add usage
@@ -655,6 +688,7 @@ func (manager *SVirtualResourceBaseManager) GetPropertyProjectTagValueTree(
 		manager.GetIVirtualModelManager(),
 		"project",
 		"tenant_id",
+		"",
 		ctx,
 		userCred,
 		query,

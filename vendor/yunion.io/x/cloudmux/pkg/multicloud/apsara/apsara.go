@@ -262,6 +262,9 @@ func (self *SApsaraClient) getDefaultClient(regionId string) (*sdk.Client, error
 					return nil, errors.Wrapf(err, "ParseQuery(%s)", req.URL.RawQuery)
 				}
 				action := params.Get("OpenApiAction")
+				if len(action) == 0 {
+					action = params.Get("Action")
+				}
 				service := strings.ToLower(params.Get("Product"))
 				respCheck := func(resp *http.Response) error {
 					if self.cpcfg.UpdatePermission != nil {
@@ -288,7 +291,7 @@ func (self *SApsaraClient) getDefaultClient(regionId string) (*sdk.Client, error
 					}
 					return nil
 				}
-				if self.cpcfg.ReadOnly {
+				if self.cpcfg.ReadOnly && len(action) > 0 {
 					for _, prefix := range []string{"Get", "List", "Describe"} {
 						if strings.HasPrefix(action, prefix) {
 							return respCheck, nil
@@ -354,7 +357,7 @@ func (self *SApsaraClient) ossRequest(apiName string, params map[string]string) 
 	//	params["Params"] = jsonutils.Marshal(pm).String()
 	//}
 	if _, ok := params["RegionId"]; !ok {
-		params["RegionId"] = self.cpcfg.DefaultRegion
+		params["RegionId"] = self.cpcfg.RegionId
 	}
 	params["ProductName"] = "oss"
 	params["OpenApiAction"] = apiName
@@ -372,8 +375,8 @@ func (self *SApsaraClient) trialRequest(apiName string, params map[string]string
 
 func (self *SApsaraClient) fetchRegions() error {
 	params := map[string]string{"AcceptLanguage": "zh-CN"}
-	if len(self.cpcfg.DefaultRegion) > 0 {
-		params["RegionId"] = self.cpcfg.DefaultRegion
+	if len(self.cpcfg.RegionId) > 0 {
+		params["RegionId"] = self.cpcfg.RegionId
 	}
 	body, err := self.ecsRequest("DescribeRegions", params)
 	if err != nil {
@@ -458,8 +461,8 @@ func (self *SApsaraClient) GetAccountId() string {
 	return self.cpcfg.URL
 }
 
-func (self *SApsaraClient) GetIRegions() []cloudprovider.ICloudRegion {
-	return self.iregions
+func (self *SApsaraClient) GetIRegions() ([]cloudprovider.ICloudRegion, error) {
+	return self.iregions, nil
 }
 
 func (self *SApsaraClient) GetIRegionById(id string) (cloudprovider.ICloudRegion, error) {
@@ -530,6 +533,7 @@ func (region *SApsaraClient) GetCapabilities() []string {
 		cloudprovider.CLOUD_CAPABILITY_QUOTA + cloudprovider.READ_ONLY_SUFFIX,
 		cloudprovider.CLOUD_CAPABILITY_IPV6_GATEWAY + cloudprovider.READ_ONLY_SUFFIX,
 		cloudprovider.CLOUD_CAPABILITY_TABLESTORE + cloudprovider.READ_ONLY_SUFFIX,
+		cloudprovider.CLOUD_CAPABILITY_SNAPSHOT_POLICY,
 	}
 	return caps
 }
