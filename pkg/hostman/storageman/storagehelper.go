@@ -19,6 +19,7 @@ import (
 
 	"yunion.io/x/jsonutils"
 
+	"yunion.io/x/onecloud/pkg/apis"
 	api "yunion.io/x/onecloud/pkg/apis/compute"
 	"yunion.io/x/onecloud/pkg/mcclient"
 )
@@ -35,6 +36,21 @@ func (i *SDiskCreateByDiskinfo) String() string {
 	return fmt.Sprintf("disk_id: %s, disk_info: %s", i.DiskId, jsonutils.Marshal(i.DiskInfo))
 }
 
+type SDiskMigrate struct {
+	DiskId             string
+	Disk               IDisk
+	SrcStorageId       string
+	TemplateId         string
+	OutChainSnaps      []jsonutils.JSONObject
+	SnapsChain         []jsonutils.JSONObject
+	DiskBackingFile    string
+	SnapshotsUri       string
+	DiskUri            string
+	SysDiskHasTemplate bool
+
+	Storage IStorage
+}
+
 type SDiskReset struct {
 	SnapshotId    string
 	BackingDiskId string
@@ -46,8 +62,22 @@ type SDiskCleanupSnapshots struct {
 	DeleteSnapshots  []jsonutils.JSONObject
 }
 
+type SStorageDeleteSnapshots struct {
+	DiskId      string
+	SnapshotIds []string
+}
+
+type SStorageDeleteSnapshot struct {
+	DiskId          string
+	SnapshotId      string
+	ConvertSnapshot string
+	BlockStream     bool
+	EncryptInfo     apis.SEncryptInfo
+}
+
 type SDiskBackup struct {
 	SnapshotId              string              `json:"snapshot_id"`
+	SnapshotLocation        string              `json:"snapshot_location"`
 	BackupId                string              `json:"backup_id"`
 	BackupStorageId         string              `json:"backup_storage_id"`
 	BackupStorageAccessInfo *jsonutils.JSONDict `json:"backup_storage_access_info"`
@@ -59,6 +89,7 @@ type SDiskBackup struct {
 
 type SStorageBackup struct {
 	BackupId                string
+	BackupLocalPath         string
 	BackupStorageId         string
 	BackupStorageAccessInfo *jsonutils.JSONDict
 }

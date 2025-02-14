@@ -42,7 +42,7 @@ var (
 )
 
 func init() {
-	notifyClientWorkerMan = appsrv.NewWorkerManager("NotifyClientWorkerManager", 1, 50, false)
+	notifyClientWorkerMan = appsrv.NewWorkerManager("NotifyClientWorkerManager", 1, 1024, false)
 
 	// set db notify hook
 	db.SetUpdateNotifyHook(func(ctx context.Context, userCred mcclient.TokenCredential, obj db.IModel) {
@@ -53,6 +53,37 @@ func init() {
 		EventNotify(ctx, userCred, SEventNotifyParam{
 			Obj:    obj,
 			Action: ActionUpdate,
+		})
+	})
+
+	db.SetCustomizeNotifyHook(func(ctx context.Context, userCred mcclient.TokenCredential, action string, obj db.IModel, moreDetails jsonutils.JSONObject) {
+		_, ok := notifyDBHookResources.Load(obj.KeywordPlural())
+		if !ok {
+			return
+		}
+		EventNotify(ctx, userCred, SEventNotifyParam{
+			Obj:    obj,
+			Action: api.SAction(action),
+			ObjDetailsDecorator: func(ctx context.Context, details *jsonutils.JSONDict) {
+				if moreDetails != nil {
+					details.Set("customize_details", moreDetails)
+				}
+			},
+		})
+	})
+
+	db.SetStatusChangedNotifyHook(func(ctx context.Context, userCred mcclient.TokenCredential, oldStatus, newStatus string, obj db.IModel) {
+		_, ok := notifyDBHookResources.Load(obj.KeywordPlural())
+		if !ok {
+			return
+		}
+		EventNotify(ctx, userCred, SEventNotifyParam{
+			Obj:    obj,
+			Action: api.ActionStatusChanged,
+			ObjDetailsDecorator: func(ctx context.Context, details *jsonutils.JSONDict) {
+				details.Set("old_status", jsonutils.NewString(oldStatus))
+				details.Set("new_status", jsonutils.NewString(newStatus))
+			},
 		})
 	})
 }

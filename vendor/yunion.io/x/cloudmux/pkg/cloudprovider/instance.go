@@ -171,6 +171,13 @@ type SManagedVMCreateConfig struct {
 	UserDataType                    string
 	WindowsUserDataType             string
 	IsWindowsUserDataTypeNeedEncode bool
+
+	IsolateDevices []SIsolateDevice
+}
+
+type SIsolateDevice struct {
+	Id   string
+	Name string
 }
 
 type SManagedVMChangeConfig struct {
@@ -187,6 +194,7 @@ type SManagedVMRebuildRootConfig struct {
 	PublicKey string
 	SysSizeGB int
 	OsType    string
+	UserData  string
 }
 
 func (vmConfig *SManagedVMCreateConfig) GetConfig(config *jsonutils.JSONDict) error {
@@ -353,10 +361,23 @@ type ServerVncOutput struct {
 	ConnectParams string `json:"connect_params"`
 	Session       string `json:"session"`
 
+	// sangfor
+	Cookie string `json:"cookie"`
+
 	Hypervisor string `json:"hypervisor"`
 }
 
 type SInstanceUpdateOptions struct {
 	NAME        string
+	HostName    string
 	Description string
+}
+
+type SInstanceDeployOptions struct {
+	Username      string
+	Password      string
+	PublicKey     string
+	KeypairName   string
+	DeleteKeypair bool
+	UserData      string
 }

@@ -17,6 +17,7 @@ package cloudcommon
 import (
 	"context"
 	"database/sql"
+	"strings"
 	"time"
 
 	"github.com/mattn/go-sqlite3"
@@ -25,6 +26,7 @@ import (
 	"yunion.io/x/log"
 	"yunion.io/x/pkg/errors"
 	"yunion.io/x/sqlchemy"
+	_ "yunion.io/x/sqlchemy/backends"
 
 	noapi "yunion.io/x/onecloud/pkg/apis/notify"
 	"yunion.io/x/onecloud/pkg/cloudcommon/consts"
@@ -34,6 +36,7 @@ import (
 	"yunion.io/x/onecloud/pkg/cloudcommon/informer"
 	"yunion.io/x/onecloud/pkg/cloudcommon/notifyclient"
 	common_options "yunion.io/x/onecloud/pkg/cloudcommon/options"
+	"yunion.io/x/onecloud/pkg/util/dbutils"
 )
 
 func InitDB(options *common_options.DBOptions) {
@@ -41,6 +44,8 @@ func InitDB(options *common_options.DBOptions) {
 		log.Warningf("debug Sqlchemy is turned on")
 		sqlchemy.DEBUG_SQLCHEMY = true
 	}
+
+	log.Infof("Registered SQL drivers: %s", strings.Join(sql.Drivers(), ", "))
 
 	consts.QueryOffsetOptimization = options.QueryOffsetOptimization
 
@@ -63,6 +68,10 @@ func InitDB(options *common_options.DBOptions) {
 	}
 	backend := sqlchemy.MySQLBackend
 	switch dialect {
+	case "dm":
+		backend = sqlchemy.DamengBackend
+		dialect = "dm"
+		sqlStr = "dm://" + sqlStr
 	case "sqlite3":
 		backend = sqlchemy.SQLiteBackend
 		dialect = "sqlite3_with_extensions"
@@ -77,6 +86,8 @@ func InitDB(options *common_options.DBOptions) {
 		log.Fatalf("cannot use clickhouse as primary database")
 	}
 	log.Infof("database dialect: %s sqlStr: %s", dialect, sqlStr)
+	// save configuration to consts
+	consts.SetDefaultDB(dialect, sqlStr)
 	dbConn, err := sql.Open(dialect, sqlStr)
 	if err != nil {
 		panic(err)
@@ -87,11 +98,11 @@ func InitDB(options *common_options.DBOptions) {
 	if err == nil {
 		// connect to clickcloud
 		// force convert sqlstr from clickhouse v2 to v1
-		sqlStr, err = clickhouseSqlStrV2ToV1(sqlStr)
+		sqlStr, err = dbutils.ClickhouseSqlStrV2ToV1(sqlStr)
 		if err != nil {
 			log.Fatalf("fail to convert clickhouse sqlstr from v2 to v1: %s", err)
 		}
-		err = validateClickhouseV1Str(sqlStr)
+		err = dbutils.ValidateClickhouseV1Str(sqlStr)
 		if err != nil {
 			log.Fatalf("invalid clickhouse sqlstr: %s", err)
 		}
@@ -131,6 +142,10 @@ func InitDB(options *common_options.DBOptions) {
 		lockman.Init(lm)
 	}
 	// lm := lockman.NewNoopLockManager()
+
+	if options.EnableDBChecksumTables && len(options.DBChecksumHashAlgorithm) > 0 {
+		consts.SetDefaultDBChecksumHashAlgorithm(options.DBChecksumHashAlgorithm)
+	}
 
 	initDBNotifier()
 	startInitInformer(options)

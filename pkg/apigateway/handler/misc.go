@@ -108,6 +108,8 @@ func (h *MiscHandler) Bind(app *appsrv.Application) {
 	// syslog webservice handlers
 	app.AddHandler(POST, prefix+"syslog/token", handleSyslogWebServiceToken)
 	app.AddHandler(POST, prefix+"syslog/message", handleSyslogWebServiceMessage)
+	// service settings
+	app.AddHandler(GET, prefix+"service_settings", h.getServiceSettings)
 }
 
 func UploadHandlerInfo(method, prefix string, handler func(context.Context, http.ResponseWriter, *http.Request)) *appsrv.SHandlerInfo {
@@ -250,7 +252,12 @@ func (mh *MiscHandler) DoBatchHostRegister(ctx context.Context, w http.ResponseW
 
 	ips := []string{}
 	hosts := bytes.Buffer{}
-	for _, row := range rows[1:] {
+	for idx, row := range rows[1:] {
+		rowStr := strings.Join(row, "")
+		if len(rowStr) == 0 {
+			log.Warningf("empty row: %d, skipping it", idx+1)
+			continue
+		}
 		var e *httputils.JSONClientError
 		if i1 >= 0 && len(row[i1]) > 0 {
 			i1Ip := fmt.Sprintf("%d-%s", i1, row[i1])
@@ -455,7 +462,7 @@ func (mh *MiscHandler) getDownloadsHandler(ctx context.Context, w http.ResponseW
 	params := appctx.AppContextParams(ctx)
 	template, ok := params["<template_id>"]
 	if !ok || len(template) == 0 {
-		httperrors.InvalidInputError(ctx, w, "template_id")
+		httperrors.MissingParameterError(ctx, w, "template_id")
 		return
 	}
 

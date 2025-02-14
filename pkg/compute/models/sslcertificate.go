@@ -33,6 +33,8 @@ import (
 	"yunion.io/x/onecloud/pkg/util/stringutils2"
 )
 
+// +onecloud:swagger-gen-model-singular=sslcertificate
+// +onecloud:swagger-gen-model-plural=sslcertificates
 type SSSLCertificateManager struct {
 	db.SVirtualResourceBaseManager
 	db.SExternalizedResourceBaseManager
@@ -74,8 +76,8 @@ type SSSLCertificate struct {
 	Fingerprint string    `width:"128" charset:"utf8" nullable:"false" list:"user" create:"required"`
 	City        string    `width:"2048" charset:"utf8" nullable:"false" list:"user" create:"required"`
 	OrgName     string    `width:"2048" charset:"utf8" nullable:"false" list:"user" create:"required"`
-	Certificate string    `charset:"utf8" nullable:"false" list:"user" create:"required"`
-	PrivateKey  string    `charset:"utf8" nullable:"false" list:"user" create:"required"`
+	Certificate string    `charset:"utf8" nullable:"true" list:"user" create:"required"`
+	PrivateKey  string    `charset:"utf8" nullable:"true" list:"user" create:"required"`
 }
 
 func (s SSSLCertificate) GetExternalId() string {
@@ -303,7 +305,7 @@ func (s *SSSLCertificate) SyncWithCloudSSLCertificate(ctx context.Context, userC
 	}
 
 	if provider := s.GetCloudprovider(); provider != nil {
-		SyncCloudProject(ctx, userCred, s, provider.GetOwnerId(), ext, provider.Id)
+		SyncCloudProject(ctx, userCred, s, provider.GetOwnerId(), ext, provider)
 	}
 	db.OpsLog.LogSyncUpdate(s, diff, userCred)
 	return nil
@@ -365,7 +367,7 @@ func (r *SCloudprovider) newFromCloudSSLCertificate(
 	// 同步标签
 	_ = syncVirtualResourceMetadata(ctx, userCred, &s, ext, false)
 	// 同步项目归属
-	SyncCloudProject(ctx, userCred, &s, r.GetOwnerId(), ext, r.Id)
+	SyncCloudProject(ctx, userCred, &s, r.GetOwnerId(), ext, r)
 
 	db.OpsLog.LogEvent(&s, db.ACT_CREATE, s.GetShortDesc(ctx), userCred)
 

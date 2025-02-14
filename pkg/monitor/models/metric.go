@@ -374,20 +374,30 @@ func (manager *SMetricMeasurementManager) getMeasurement(query *sqlchemy.SQuery)
 	return measurements, nil
 }
 
-func (manager *SMetricMeasurementManager) getInfluxdbMeasurements() (influxdbMeasurements []monitor.InfluxMeasurement, err error) {
-	metric, err := manager.getMeasurement(manager.Query())
+func (manager *SMetricMeasurementManager) getMeasurementsFromDB() ([]monitor.InfluxMeasurement, error) {
+	ms, err := manager.getMeasurement(manager.Query())
 	if err != nil {
-		return
+		return nil, errors.Wrap(err, "getMeasurement")
 	}
-	for i, _ := range metric {
-		influxdbMeasurements = append(influxdbMeasurements, monitor.InfluxMeasurement{
-			Database:    metric[i].Database,
-			Measurement: metric[i].Name,
-			ResType:     metric[i].ResType,
-		})
+	ret := make([]monitor.InfluxMeasurement, len(ms))
+	for i := range ms {
+		m := ms[i]
+		fields, _ := m.getFields()
+		if len(fields) == 0 {
+			continue
+		}
+		fieldsKey := make([]string, len(fields))
+		for i, field := range fields {
+			fieldsKey[i] = field.Name
+		}
+		ret[i] = monitor.InfluxMeasurement{
+			Database:    m.Database,
+			Measurement: m.Name,
+			ResType:     m.ResType,
+			FieldKey:    fieldsKey,
+		}
 	}
-	return
-
+	return ret, nil
 }
 
 func (measurement *SMetricMeasurement) getFieldsQuery() *sqlchemy.SQuery {
@@ -416,7 +426,6 @@ func (manager *SMetricMeasurementManager) Init() error {
 }
 
 func (man *SMetricMeasurementManager) Run(ctx context.Context) error {
-
 	err := man.initJsonMetricInfo(ctx)
 	if err != nil {
 		return errors.Wrap(err, "init metric json error")
@@ -664,7 +673,7 @@ func (self *SMetricMeasurement) CustomizeDelete(
 		return err
 	}
 	for _, joint := range metricJoint {
-		field, err := joint.GetMetricField()
+		field, err := joint.GetMetricField(ctx)
 		if err != nil {
 			return err
 		}

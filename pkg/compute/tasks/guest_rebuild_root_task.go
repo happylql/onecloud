@@ -44,7 +44,7 @@ func (self *GuestRebuildRootTask) OnInit(ctx context.Context, obj db.IStandalone
 	guest := obj.(*models.SGuest)
 	if jsonutils.QueryBoolean(self.Params, "need_stop", false) {
 		self.SetStage("OnStopServerComplete", nil)
-		guest.StartGuestStopTask(ctx, self.UserCred, false, false, self.GetTaskId())
+		guest.StartGuestStopTask(ctx, self.UserCred, 60, false, false, self.GetTaskId())
 	} else {
 		self.StartRebuildRootDisk(ctx, guest)
 	}
@@ -56,7 +56,7 @@ func (self *GuestRebuildRootTask) OnStopServerComplete(ctx context.Context, gues
 
 func (self *GuestRebuildRootTask) markFailed(ctx context.Context, guest *models.SGuest, reason jsonutils.JSONObject) {
 	logclient.AddActionLogWithStartable(self, guest, logclient.ACT_VM_REBUILD, reason, self.UserCred, false)
-	guest.SetStatus(self.GetUserCred(), api.VM_REBUILD_ROOT_FAIL, reason.String())
+	guest.SetStatus(ctx, self.GetUserCred(), api.VM_REBUILD_ROOT_FAIL, reason.String())
 	self.SGuestBaseTask.SetStageFailed(ctx, reason)
 	notifyclient.EventNotify(ctx, self.GetUserCred(), notifyclient.SEventNotifyParam{
 		Obj:    guest,
@@ -94,7 +94,7 @@ func (self *GuestRebuildRootTask) StartRebuildRootDisk(ctx context.Context, gues
 	}
 
 	self.SetStage("OnRebuildRootDiskComplete", nil)
-	guest.SetStatus(self.UserCred, api.VM_REBUILD_ROOT, "")
+	guest.SetStatus(ctx, self.UserCred, api.VM_REBUILD_ROOT, "")
 
 	// clear logininfo
 	loginParams := make(map[string]interface{})
@@ -103,7 +103,12 @@ func (self *GuestRebuildRootTask) StartRebuildRootDisk(ctx context.Context, gues
 	loginParams["login_key_timestamp"] = "none"
 	guest.SetAllMetadata(ctx, loginParams, self.UserCred)
 
-	guest.GetDriver().RequestRebuildRootDisk(ctx, guest, self)
+	drv, err := guest.GetDriver()
+	if err != nil {
+		self.OnRebuildRootDiskCompleteFailed(ctx, guest, jsonutils.NewString(err.Error()))
+		return
+	}
+	drv.RequestRebuildRootDisk(ctx, guest, self)
 }
 
 func (self *GuestRebuildRootTask) OnRebuildRootDiskComplete(ctx context.Context, guest *models.SGuest, data jsonutils.JSONObject) {
@@ -111,7 +116,7 @@ func (self *GuestRebuildRootTask) OnRebuildRootDiskComplete(ctx context.Context,
 	if allDisks {
 		disks, _ := guest.GetDisks()
 		for i := 1; i < len(disks); i += 1 {
-			disks[i].SetStatus(self.UserCred, api.DISK_INIT, "rebuild data disks")
+			disks[i].SetStatus(ctx, self.UserCred, api.DISK_INIT, "rebuild data disks")
 		}
 		self.SetStage("OnRebuildingDataDisksComplete", nil)
 		self.OnRebuildingDataDisksComplete(ctx, guest, data)
@@ -124,7 +129,7 @@ func (self *GuestRebuildRootTask) OnRebuildingDataDisksComplete(ctx context.Cont
 	diskReady := true
 	disks, _ := guest.GetDisks()
 	if len(disks) > 0 {
-		guest.SetStatus(self.UserCred, api.VM_REBUILD_ROOT, "rebuild data disks")
+		guest.SetStatus(ctx, self.UserCred, api.VM_REBUILD_ROOT, "rebuild data disks")
 	}
 	for i := 1; i < len(disks); i += 1 {
 		if disks[i].Status == api.DISK_INIT {
@@ -141,7 +146,7 @@ func (self *GuestRebuildRootTask) OnRebuildingDataDisksCompleteFailed(ctx contex
 	/*
 		XXX ignore rebuild data disk errors
 		db.OpsLog.LogEvent(guest, db.ACT_REBUILD_ROOT_FAIL, data, self.UserCred)
-		guest.SetStatus(self.UserCred, models.VM_REBUILD_ROOT_FAIL, "OnRebuildingDataDisksCompleteFailed")
+		guest.SetStatus(ctx,self.UserCred, models.VM_REBUILD_ROOT_FAIL, "OnRebuildingDataDisksCompleteFailed")
 		logclient.AddActionLog(guest, logclient.ACT_VM_REBUILD, data, self.UserCred, false)
 		self.SetStageFailed(ctx, data.String())
 	*/
@@ -191,7 +196,7 @@ func (self *GuestRebuildRootTask) OnRebuildAllDisksComplete(ctx context.Context,
 
 func (self *GuestRebuildRootTask) OnRebuildRootDiskCompleteFailed(ctx context.Context, guest *models.SGuest, data jsonutils.JSONObject) {
 	db.OpsLog.LogEvent(guest, db.ACT_REBUILD_ROOT_FAIL, data, self.UserCred)
-	guest.SetStatus(self.UserCred, api.VM_REBUILD_ROOT_FAIL, "OnRebuildRootDiskCompleteFailed")
+	guest.SetStatus(ctx, self.UserCred, api.VM_REBUILD_ROOT_FAIL, "OnRebuildRootDiskCompleteFailed")
 	self.markFailed(ctx, guest, data)
 }
 
@@ -235,7 +240,7 @@ func (self *KVMGuestRebuildRootTask) OnRebuildRootDiskComplete(ctx context.Conte
 	guest := obj.(*models.SGuest)
 
 	self.SetStage("OnGuestDeployComplete", nil)
-	guest.SetStatus(self.UserCred, api.VM_DEPLOYING, "")
+	guest.SetStatus(ctx, self.UserCred, api.VM_DEPLOYING, "")
 	deployParams, _ := self.Params.Get("deploy_params")
 	var params *jsonutils.JSONDict
 	if deployParams != nil {
@@ -270,14 +275,19 @@ func (self *ManagedGuestRebuildRootTask) OnInit(ctx context.Context, obj db.ISta
 	guest := obj.(*models.SGuest)
 
 	self.SetStage("OnHostCacheImageComplete", nil)
-	guest.GetDriver().RequestGuestCreateAllDisks(ctx, guest, self)
+	drv, err := guest.GetDriver()
+	if err != nil {
+		self.OnHostCacheImageCompleteFailed(ctx, guest, jsonutils.NewString(err.Error()))
+		return
+	}
+	drv.RequestGuestCreateAllDisks(ctx, guest, self)
 }
 
 func (self *ManagedGuestRebuildRootTask) OnHostCacheImageComplete(ctx context.Context, obj db.IStandaloneModel, data jsonutils.JSONObject) {
 	guest := obj.(*models.SGuest)
 
 	self.SetStage("OnGuestDeployComplete", nil)
-	guest.SetStatus(self.UserCred, api.VM_DEPLOYING, "rebuild deploy")
+	guest.SetStatus(ctx, self.UserCred, api.VM_DEPLOYING, "rebuild deploy")
 	deployParams, _ := self.Params.Get("deploy_params")
 	var params *jsonutils.JSONDict
 	if deployParams != nil {

@@ -44,9 +44,14 @@ func (self *DiskCreateTask) OnInit(ctx context.Context, obj db.IStandaloneModel,
 	// use image only if disk not created from snapshot or backup
 	if len(imageId) > 0 && len(disk.SnapshotId) == 0 && len(disk.BackupId) == 0 {
 		self.SetStage("OnStorageCacheImageComplete", nil)
+		cacheImageFmt, err := disk.GetCacheImageFormat(ctx)
+		if err != nil {
+			self.OnStartAllocateFailed(ctx, disk, jsonutils.NewString(err.Error()))
+			return
+		}
 		input := api.CacheImageInput{
 			ImageId:      imageId,
-			Format:       disk.GetCacheImageFormat(),
+			Format:       cacheImageFmt,
 			ParentTaskId: self.GetTaskId(),
 		}
 		guest := disk.GetGuest()
@@ -67,7 +72,7 @@ func (self *DiskCreateTask) OnStorageCacheImageComplete(ctx context.Context, dis
 	} else {
 		guest := disk.GetGuest()
 		if guest != nil {
-			guest.SetStatus(self.GetUserCred(), api.VM_CREATE_DISK, "OnStorageCacheImageComplete")
+			guest.SetStatus(ctx, self.GetUserCred(), api.VM_CREATE_DISK, "OnStorageCacheImageComplete")
 		}
 	}
 	storage, err := disk.GetStorage()
@@ -75,13 +80,13 @@ func (self *DiskCreateTask) OnStorageCacheImageComplete(ctx context.Context, dis
 		self.OnStartAllocateFailed(ctx, disk, jsonutils.NewString(errors.Wrapf(err, "disk.GetStorage").Error()))
 		return
 	}
-	host, err := disk.GetMasterHost()
+	host, err := disk.GetMasterHost(storage)
 	if err != nil {
 		self.OnStartAllocateFailed(ctx, disk, jsonutils.NewString(errors.Wrapf(err, "GetMasterHost").Error()))
 		return
 	}
 	db.OpsLog.LogEvent(disk, db.ACT_ALLOCATING, disk.GetShortDesc(ctx), self.GetUserCred())
-	disk.SetStatus(self.GetUserCred(), api.DISK_STARTALLOC, fmt.Sprintf("Disk start alloc use host %s(%s)", host.Name, host.Id))
+	disk.SetStatus(ctx, self.GetUserCred(), api.DISK_STARTALLOC, fmt.Sprintf("Disk start alloc use host %s(%s)", host.Name, host.Id))
 	if rebuild && storage.StorageType == api.STORAGE_RBD {
 		if count, _ := disk.GetSnapshotCount(); count > 0 {
 			backingDiskId := stringutils.UUID4()
@@ -95,7 +100,7 @@ func (self *DiskCreateTask) OnStorageCacheImageComplete(ctx context.Context, dis
 }
 
 func (self *DiskCreateTask) OnStartAllocateFailed(ctx context.Context, disk *models.SDisk, data jsonutils.JSONObject) {
-	disk.SetStatus(self.UserCred, api.DISK_ALLOC_FAILED, data.String())
+	disk.SetStatus(ctx, self.UserCred, api.DISK_ALLOC_FAILED, data.String())
 	logclient.AddActionLogWithStartable(self, disk, logclient.ACT_ALLOCATE, data, self.UserCred, false)
 	self.SetStageFailed(ctx, data)
 }
@@ -123,18 +128,30 @@ func (self *DiskCreateTask) OnDiskReady(ctx context.Context, disk *models.SDisk,
 		}
 	}
 
-	disk.SetStatus(self.UserCred, api.DISK_READY, "")
+	disk.SetStatus(ctx, self.UserCred, api.DISK_READY, "")
 	self.CleanHostSchedCache(disk)
 	db.OpsLog.LogEvent(disk, db.ACT_ALLOCATE, disk.GetShortDesc(ctx), self.UserCred)
 	notifyclient.EventNotify(ctx, self.UserCred, notifyclient.SEventNotifyParam{
 		Obj:    disk,
 		Action: notifyclient.ActionCreate,
 	})
+	if !self.IsSubtask() {
+		guest := disk.GetGuest()
+		if guest != nil {
+			// just sync guest status
+			guest.StartSyncstatus(ctx, self.GetUserCred(), "")
+		}
+	}
 	self.SetStageComplete(ctx, nil)
 }
 
 func (self *DiskCreateTask) OnDiskReadyFailed(ctx context.Context, disk *models.SDisk, data jsonutils.JSONObject) {
-	disk.SetStatus(self.UserCred, api.DISK_ALLOC_FAILED, data.String())
+	rebuild, _ := self.GetParams().Bool("rebuild")
+	status := api.DISK_ALLOC_FAILED
+	if rebuild {
+		status = api.DISK_REBUILD_FAILED
+	}
+	disk.SetStatus(ctx, self.UserCred, status, data.String())
 	logclient.AddActionLogWithStartable(self, disk, logclient.ACT_ALLOCATE, data, self.UserCred, false)
 	self.SetStageFailed(ctx, data)
 }

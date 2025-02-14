@@ -18,7 +18,6 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
-	"path"
 	"regexp"
 	"strconv"
 	"strings"
@@ -36,6 +35,18 @@ import (
 	"yunion.io/x/onecloud/pkg/util/regutils2"
 	"yunion.io/x/onecloud/pkg/util/xfsutils"
 )
+
+var ext4UsageTypeLargefileSize int64 = 1024 * 1024 * 1024 * 1024 * 4
+var ext4UsageTypeHugefileSize int64 = 1024 * 1024 * 1024 * 512
+
+func SetExt4UsageTypeThresholds(largefile, hugefile int64) {
+	if largefile > 0 {
+		ext4UsageTypeLargefileSize = largefile
+	}
+	if hugefile > 0 {
+		ext4UsageTypeHugefileSize = hugefile
+	}
+}
 
 func IsPartedFsString(fsstr string) bool {
 	return utils.IsInStringArray(strings.ToLower(fsstr), []string{
@@ -120,7 +131,7 @@ func GetDevSector512Count(dev string) int {
 	return size
 }
 
-func ResizeDiskFs(diskPath string, sizeMb int) error {
+func ResizeDiskFs(diskPath string, sizeMb int, mounted bool) error {
 	var cmds = []string{"parted", "-a", "none", "-s", diskPath, "--", "unit", "s", "print"}
 	lines, err := procutils.NewCommand(cmds[0], cmds[1:]...).Output()
 	if err != nil {
@@ -140,7 +151,6 @@ func ResizeDiskFs(diskPath string, sizeMb int) error {
 	}
 	parts, label := ParseDiskPartition(diskPath, strings.Split(string(lines), "\n"))
 	log.Infof("Parts: %v label: %s", parts, label)
-	maxSector := GetDevSector512Count(path.Base(diskPath))
 	if label == "gpt" {
 		proc := procutils.NewCommand("gdisk", diskPath)
 		stdin, err := proc.StdinPipe()
@@ -188,28 +198,14 @@ func ResizeDiskFs(diskPath string, sizeMb int) error {
 	}
 	if len(parts) > 0 && (label == "gpt" ||
 		(label == "msdos" && parts[len(parts)-1][5] == "primary")) {
-		var (
-			part = parts[len(parts)-1]
-			end  int
-		)
-		if sizeMb > 0 {
-			end = sizeMb * 1024 * 2
-		} else if label == "gpt" {
-			end = maxSector - 35
-		} else {
-			end = maxSector - 1
-		}
-		if label == "msdos" && end >= 4294967296 {
-			end = 4294967295
-		}
+		var part = parts[len(parts)-1]
 		if IsSupportResizeFs(part[6]) {
-			cmds := []string{"parted", "-a", "none", "-s", diskPath, "--", "resizepart", part[0], fmt.Sprintf("%ds", end)}
-			log.Infof("resize disk partition: %s", cmds)
-			output, err := procutils.NewCommand(cmds[0], cmds[1:]...).Output()
+			// growpart script replace parted resizepart
+			output, err := procutils.NewCommand("growpart", diskPath, part[0]).Output()
 			if err != nil {
-				return errors.Wrapf(err, "parted failed %s", output)
+				return errors.Wrapf(err, "growpart failed %s", output)
 			}
-			err, _ = ResizePartitionFs(part[7], part[6], false)
+			err, _ = ResizePartitionFs(part[7], part[6], false, mounted)
 			if err != nil {
 				return errors.Wrapf(err, "resize fs %s", part[6])
 			}
@@ -229,7 +225,7 @@ func IsSupportResizeFs(fs string) bool {
 	return false
 }
 
-func ResizePartitionFs(fpath, fs string, raiseError bool) (error, bool) {
+func ResizePartitionFs(fpath, fs string, raiseError, mounted bool) (error, bool) {
 	if len(fs) == 0 {
 		return nil, false
 	}
@@ -244,13 +240,16 @@ func ResizePartitionFs(fpath, fs string, raiseError bool) (error, bool) {
 			cmds = [][]string{{"mkswap", fpath}}
 		}
 	} else if strings.HasPrefix(fs, "ext") {
-		if !FsckExtFs(fpath) {
-			if raiseError {
-				return fmt.Errorf("Failed to fsck ext fs %s", fpath), false
-			} else {
-				return nil, false
+		if !mounted {
+			if !FsckExtFs(fpath) {
+				if raiseError {
+					return fmt.Errorf("Failed to fsck ext fs %s", fpath), false
+				} else {
+					return nil, false
+				}
 			}
 		}
+
 		cmds = [][]string{{"resize2fs", fpath}}
 	} else if fs == "xfs" {
 		var tmpPoint = fmt.Sprintf("/tmp/%s", strings.Replace(fpath, "/", "_", -1))
@@ -301,23 +300,22 @@ func ResizePartitionFs(fpath, fs string, raiseError bool) (error, bool) {
 func FsckExtFs(fpath string) bool {
 	log.Debugf("Exec command: %v", []string{"e2fsck", "-f", "-p", fpath})
 	cmd := procutils.NewCommand("e2fsck", "-f", "-p", fpath)
-	if err := cmd.Start(); err != nil {
-		log.Errorf("e2fsck start failed: %s", err)
-		return false
-	} else {
-		err = cmd.Wait()
-		if err != nil {
-			if status, ok := cmd.GetExitStatus(err); ok {
-				if status < 4 {
-					return true
-				}
+
+	out, err := cmd.Output()
+	if err != nil {
+		log.Errorf("e2fsck failed %s: %s", err, out)
+		if status, ok := cmd.GetExitStatus(err); ok {
+			log.Errorf("e2fsck exit status %d", status)
+			if status < 4 {
+				return true
+			} else {
+				return false
 			}
-			log.Errorln(err)
-			return false
 		} else {
-			return true
+			return false
 		}
 	}
+	return true
 }
 
 // https://bugs.launchpad.net/ubuntu/+source/xfsprogs/+bug/1718244
@@ -364,7 +362,28 @@ func Mkpartition(imagePath, fsFormat string) error {
 	return nil
 }
 
-func FormatPartition(path, fs, uuid string) error {
+func ext4UsageType(path string) string {
+	out, err := procutils.NewCommand("blockdev", "--getsize64", path).Output()
+	if err != nil {
+		log.Errorf("failed get blockdev %s size: %s", path, err)
+		return ""
+	}
+	size, err := strconv.ParseInt(strings.TrimSpace(string(out)), 10, 64)
+	if err != nil {
+		log.Errorf("failed parse blocksize %s", out)
+		return ""
+	}
+	if size > ext4UsageTypeLargefileSize {
+		// node_ratio 1M
+		return "largefile"
+	} else if size > ext4UsageTypeHugefileSize {
+		// node_ratio 64K
+		return "huge"
+	}
+	return ""
+}
+
+func FormatPartition(path, fs, uuid string, fsFeatures *apis.FsFeatures) error {
 	var cmd, cmdUuid []string
 	switch {
 	case fs == "swap":
@@ -376,7 +395,36 @@ func FormatPartition(path, fs, uuid string) error {
 		cmd = []string{"mkfs.ext3"}
 		cmdUuid = []string{"tune2fs", "-U", uuid}
 	case fs == "ext4":
-		cmd = []string{"mkfs.ext4", "-O", "^64bit", "-E", "lazy_itable_init=1", "-T", "largefile"}
+		feature := "^64bit"
+		extendOpts := "lazy_itable_init=1"
+		featureOpts := []string{}
+		if fsFeatures != nil && fsFeatures.Ext4 != nil {
+			if fsFeatures.Ext4.CaseInsensitive {
+				feature = fmt.Sprintf("%s,casefold,project,quota", feature)
+				//feature = fmt.Sprintf("casefold,project,quota")
+				extendOpts = fmt.Sprintf("%s,nodiscard,lazy_journal_init=1,encoding_flags=strict,encoding=utf8-12.1", extendOpts)
+			}
+			if fsFeatures.Ext4.ReservedBlocksPercentage > 0 {
+				featureOpts = append(featureOpts, []string{"-m", fmt.Sprintf("%d", fsFeatures.Ext4.ReservedBlocksPercentage)}...)
+			}
+		}
+		cmd = []string{"mkfs.ext4", "-O", feature, "-E", extendOpts}
+		cmd = append(cmd, featureOpts...)
+		log.Infof("===========format partion cmd: %#v", cmd)
+		/*
+			// see /etc/mke2fs.conf, default inode_ratio is 16384
+			If  this option is is not specified, mke2fs will pick a single default usage type based on the size
+			of the filesystem to be created.  If the filesystem size is less than  or  equal  to  3  megabytes,
+			mke2fs will use the filesystem type floppy.  If the filesystem size is greater than 3 but less than
+			or equal to 512 megabytes, mke2fs(8) will use the filesystem type small.  If the filesystem size is
+			greater  than or equal to 4 terabytes but less than 16 terabytes, mke2fs(8) will use the filesystem
+			type big.  If the filesystem size is greater than or equal to 16 terabytes, mke2fs(8) will use  the
+			filesystem type huge.  Otherwise, mke2fs(8) will use the default filesystem type default.
+		*/
+		if usageType := ext4UsageType(path); usageType != "" {
+			cmd = append(cmd, "-T", usageType)
+		}
+
 		cmdUuid = []string{"tune2fs", "-U", uuid}
 	case fs == "ext4dev":
 		cmd = []string{"mkfs.ext4dev", "-E", "lazy_itable_init=1"}
@@ -495,25 +543,24 @@ func ResizeFs(d deploy_iface.IDeployer) (*apis.Empty, error) {
 	}
 
 	root, err := d.MountRootfs(false)
-	if err != nil {
-		if errors.Cause(err) == errors.ErrNotFound {
-			return new(apis.Empty), nil
-		}
+	if err != nil && errors.Cause(err) != errors.ErrNotFound {
 		return new(apis.Empty), errors.Wrapf(err, "disk.MountRootfs")
-	}
-	if !root.IsResizeFsPartitionSupport() {
-		err := unmount(root)
+	} else if err == nil {
+		if !root.IsResizeFsPartitionSupport() {
+			err := unmount(root)
+			if err != nil {
+				return new(apis.Empty), err
+			}
+			return new(apis.Empty), errors.ErrNotSupported
+		}
+
+		// must umount rootfs before resize partition
+		err = unmount(root)
 		if err != nil {
 			return new(apis.Empty), err
 		}
-		return new(apis.Empty), errors.ErrNotSupported
 	}
 
-	// must umount rootfs before resize partition
-	err = unmount(root)
-	if err != nil {
-		return new(apis.Empty), err
-	}
 	err = d.ResizePartition()
 	if err != nil {
 		return new(apis.Empty), errors.Wrap(err, "resize disk partition")
@@ -526,7 +573,7 @@ func FormatFs(d deploy_iface.IDeployer, req *apis.FormatFsParams) (*apis.Empty, 
 	if err != nil {
 		return new(apis.Empty), errors.Wrap(err, "MakePartition")
 	}
-	err = d.FormatPartition(req.FsFormat, req.Uuid)
+	err = d.FormatPartition(req.FsFormat, req.Uuid, req.FsFeatures)
 	if err != nil {
 		return new(apis.Empty), errors.Wrap(err, "FormatPartition")
 	}

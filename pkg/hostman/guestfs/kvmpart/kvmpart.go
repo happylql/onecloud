@@ -175,21 +175,9 @@ func (p *SKVMGuestDiskPartition) mount(readonly bool) error {
 		cmds = append(cmds, "-o", opt)
 	}
 	cmds = append(cmds, p.partDev, p.mountPath)
+	p.acquireXFS(fsType)
 
 	var err error
-	if fsType == "xfs" {
-		uuids, _ := fileutils2.GetDevUuid(p.partDev)
-		p.uuid = uuids["UUID"]
-		if len(p.uuid) > 0 {
-			xfsutils.LockXfsPartition(p.uuid)
-			defer func() {
-				if err != nil {
-					xfsutils.UnlockXfsPartition(p.uuid)
-				}
-			}()
-		}
-	}
-
 	retrier := func(utils.FibonacciRetrier) (bool, error) {
 		var errChan = make(chan error)
 		go func() {
@@ -202,13 +190,19 @@ func (p *SKVMGuestDiskPartition) mount(readonly bool) error {
 				errChan <- err
 			}
 		}()
+
+		// mount timeout
+		waitTime := time.Second * 30
+		if fsType == "ntfs-3g" {
+			waitTime = time.Second * 5
+		}
 		select {
-		case err := <-errChan:
+		case err = <-errChan:
 			if err != nil {
 				return false, err
 			}
 			return true, nil
-		case <-time.After(time.Second * 3):
+		case <-time.After(waitTime):
 			if fsType == "ntfs-3g" {
 				if err = procutils.NewCommand("mountpoint", p.mountPath).Run(); err != nil {
 					// mountpath is not a mountpoint
@@ -224,9 +218,26 @@ func (p *SKVMGuestDiskPartition) mount(readonly bool) error {
 	}
 	_, err = utils.NewFibonacciRetrierMaxTries(3, retrier).Start(context.Background())
 	if err != nil {
+		p.releaseXFS(fsType)
 		return errors.Wrap(err, "mount failed")
 	}
-	return nil // errors.Wrapf(err, "mount failed: %s", output)
+	return nil
+}
+
+func (p *SKVMGuestDiskPartition) acquireXFS(fsType string) {
+	if fsType == "xfs" {
+		uuids, _ := fileutils2.GetDevUuid(p.partDev)
+		p.uuid = uuids["UUID"]
+		if len(p.uuid) > 0 {
+			xfsutils.LockXfsPartition(p.uuid)
+		}
+	}
+}
+
+func (p *SKVMGuestDiskPartition) releaseXFS(fsType string) {
+	if fsType == "xfs" && len(p.uuid) > 0 {
+		xfsutils.UnlockXfsPartition(p.uuid)
+	}
 }
 
 func (p *SKVMGuestDiskPartition) fsck() error {
@@ -289,12 +300,7 @@ func (p *SKVMGuestDiskPartition) Umount() error {
 		return nil
 	}
 
-	defer func() {
-		if p.fs == "xfs" && len(p.uuid) > 0 {
-			xfsutils.UnlockXfsPartition(p.uuid)
-		}
-	}()
-
+	defer p.releaseXFS(p.fs)
 	if p.fs == "btrfs" {
 		// first try unmount btrfs subvols
 		err := btrfsutils.UnmountSubvols(p.mountPath)
@@ -303,16 +309,8 @@ func (p *SKVMGuestDiskPartition) Umount() error {
 		}
 	}
 
-	// check lsof
-	for {
-		out, err := procutils.NewCommand("lsof", p.mountPath).Output()
-		if err != nil {
-			log.Warningf("lsof %s fail %s", p.mountPath, err)
-			break
-		} else {
-			log.Infof("unmount path %s lsof %s", p.mountPath, string(out))
-			time.Sleep(time.Second * 1)
-		}
+	if _, err := procutils.NewCommand("blockdev", "--flushbufs", p.partDev).Output(); err != nil {
+		log.Warningf("blockdev --flushbufs %s error: %v", p.partDev, err)
 	}
 
 	var tries = 0
@@ -323,15 +321,15 @@ func (p *SKVMGuestDiskPartition) Umount() error {
 		log.Infof("umount %s: %s", p.partDev, p.mountPath)
 		out, err = procutils.NewCommand("umount", p.mountPath).Output()
 		if err == nil {
-			if _, err := procutils.NewCommand("blockdev", "--flushbufs", p.partDev).Output(); err != nil {
-				log.Warningf("blockdev --flushbufs %s error: %v", p.partDev, err)
-			}
 			if err := os.Remove(p.mountPath); err != nil {
 				log.Warningf("remove mount path %s error: %v", p.mountPath, err)
 			}
 			log.Infof("umount %s successfully", p.partDev)
 			return nil
 		} else {
+			lsofout, err := procutils.NewCommand("lsof", p.mountPath).Output()
+			log.Infof("unmount path %s lsof %s", p.mountPath, string(lsofout))
+
 			log.Warningf("failed umount %s: %s %s", p.partDev, err, out)
 			time.Sleep(time.Second * 3)
 		}
@@ -438,7 +436,7 @@ func (p *SKVMGuestDiskPartition) zerofreeFsInternal(fs string) error {
 	}
 	// make partition
 	uuid := uuids["UUID"]
-	err = fsutils.FormatPartition(p.partDev, fs, uuid)
+	err = fsutils.FormatPartition(p.partDev, fs, uuid, nil)
 	if err != nil {
 		return errors.Wrapf(err, "FormatPartition %s %s %s", p.partDev, fs, uuid)
 	}

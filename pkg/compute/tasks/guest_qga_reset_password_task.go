@@ -37,12 +37,15 @@ func (self *SGuestQgaBaseTask) guestPing(ctx context.Context, guest *models.SGue
 	if err != nil {
 		return err
 	}
-	return guest.GetDriver().QgaRequestGuestPing(ctx, self.GetTaskRequestHeader(), host, guest, true, nil)
+	drv, err := guest.GetDriver()
+	if err != nil {
+		return err
+	}
+	return drv.QgaRequestGuestPing(ctx, self.GetTaskRequestHeader(), host, guest, true, nil)
 }
 
 func (self *SGuestQgaBaseTask) taskFailed(ctx context.Context, guest *models.SGuest, reason string) {
-	guest.SetStatus(self.UserCred, api.VM_QGA_EXEC_COMMAND_FAILED, reason)
-	guest.UpdateQgaStatus(api.QGA_STATUS_EXECUTE_FAILED)
+	guest.SetStatus(ctx, self.UserCred, api.VM_QGA_EXEC_COMMAND_FAILED, reason)
 	db.OpsLog.LogEvent(guest, db.ACT_SET_USER_PASSWORD_FAIL, reason, self.UserCred)
 	logclient.AddActionLogWithContext(ctx, guest, logclient.ACT_SET_USER_PASSWORD, reason, self.UserCred, false)
 	self.SetStageFailed(ctx, jsonutils.NewString(reason))
@@ -73,7 +76,12 @@ func (self *GuestQgaSetPasswordTask) OnQgaGuestPing(ctx context.Context, guest *
 		self.taskFailed(ctx, guest, err.Error())
 		return
 	}
-	err = guest.GetDriver().QgaRequestSetUserPassword(ctx, self, host, guest, input)
+	drv, err := guest.GetDriver()
+	if err != nil {
+		self.taskFailed(ctx, guest, err.Error())
+		return
+	}
+	err = drv.QgaRequestSetUserPassword(ctx, self, host, guest, input)
 	if err != nil {
 		self.taskFailed(ctx, guest, err.Error())
 	}
@@ -84,8 +92,7 @@ func (self *GuestQgaSetPasswordTask) OnQgaGuestPingFailed(ctx context.Context, g
 }
 
 func (self *GuestQgaSetPasswordTask) OnQgaSetUserPassword(ctx context.Context, guest *models.SGuest, data jsonutils.JSONObject) {
-	guest.SetStatus(self.UserCred, api.VM_RUNNING, "on qga set user password success")
-	guest.UpdateQgaStatus(api.QGA_STATUS_AVAILABLE)
+	guest.SetStatus(ctx, self.UserCred, api.VM_RUNNING, "on qga set user password success")
 	db.OpsLog.LogEvent(guest, db.ACT_SET_USER_PASSWORD, "", self.UserCred)
 
 	input := &api.ServerQgaSetPasswordInput{}

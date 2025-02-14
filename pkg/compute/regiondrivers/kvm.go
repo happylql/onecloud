@@ -18,7 +18,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"net"
 	"sort"
 	"strconv"
 
@@ -28,10 +27,13 @@ import (
 	"yunion.io/x/pkg/errors"
 	"yunion.io/x/pkg/util/httputils"
 	randutil "yunion.io/x/pkg/util/rand"
+	"yunion.io/x/pkg/util/regutils"
 	"yunion.io/x/pkg/util/secrules"
+	"yunion.io/x/pkg/util/sets"
 	"yunion.io/x/pkg/utils"
 	"yunion.io/x/sqlchemy"
 
+	"yunion.io/x/onecloud/pkg/apis"
 	api "yunion.io/x/onecloud/pkg/apis/compute"
 	hostapi "yunion.io/x/onecloud/pkg/apis/host"
 	"yunion.io/x/onecloud/pkg/cloudcommon/db"
@@ -40,7 +42,6 @@ import (
 	"yunion.io/x/onecloud/pkg/cloudcommon/db/taskman"
 	"yunion.io/x/onecloud/pkg/cloudcommon/validators"
 	"yunion.io/x/onecloud/pkg/compute/models"
-	"yunion.io/x/onecloud/pkg/compute/options"
 	"yunion.io/x/onecloud/pkg/httperrors"
 	"yunion.io/x/onecloud/pkg/mcclient"
 )
@@ -54,12 +55,12 @@ func init() {
 	models.RegisterRegionDriver(&driver)
 }
 
-func RunValidators(validators map[string]validators.IValidator, data *jsonutils.JSONDict, optional bool) error {
+func RunValidators(ctx context.Context, validators map[string]validators.IValidator, data *jsonutils.JSONDict, optional bool) error {
 	for _, v := range validators {
 		if optional {
 			v.Optional(true)
 		}
-		if err := v.Validate(data); err != nil {
+		if err := v.Validate(ctx, data); err != nil {
 			return err
 		}
 	}
@@ -85,13 +86,13 @@ func (self *SKVMRegionDriver) ValidateCreateLoadbalancerData(ctx context.Context
 	// find available networks
 	var network *models.SNetwork = nil
 	if len(input.NetworkId) > 0 {
-		netObj, err := validators.ValidateModel(userCred, models.NetworkManager, &input.NetworkId)
+		netObj, err := validators.ValidateModel(ctx, userCred, models.NetworkManager, &input.NetworkId)
 		if err != nil {
 			return nil, err
 		}
 		network = netObj.(*models.SNetwork)
 	} else if len(input.VpcId) > 0 {
-		vpcObj, err := validators.ValidateModel(userCred, models.VpcManager, &input.VpcId)
+		vpcObj, err := validators.ValidateModel(ctx, userCred, models.VpcManager, &input.VpcId)
 		if err != nil {
 			return nil, err
 		}
@@ -133,7 +134,7 @@ func (self *SKVMRegionDriver) ValidateCreateLoadbalancerData(ctx context.Context
 	}
 
 	if len(input.ClusterId) > 0 {
-		clusterObj, err := validators.ValidateModel(userCred, models.LoadbalancerClusterManager, &input.ClusterId)
+		clusterObj, err := validators.ValidateModel(ctx, userCred, models.LoadbalancerClusterManager, &input.ClusterId)
 		if err != nil {
 			return nil, err
 		}
@@ -402,9 +403,9 @@ func (self *SKVMRegionDriver) RequestStopLoadbalancer(ctx context.Context, userC
 func (self *SKVMRegionDriver) RequestSyncstatusLoadbalancer(ctx context.Context, userCred mcclient.TokenCredential, lb *models.SLoadbalancer, task taskman.ITask) error {
 	originStatus, _ := task.GetParams().GetString("origin_status")
 	if utils.IsInStringArray(originStatus, []string{api.LB_STATUS_ENABLED, api.LB_STATUS_DISABLED}) {
-		lb.SetStatus(userCred, originStatus, "")
+		lb.SetStatus(ctx, userCred, originStatus, "")
 	} else {
-		lb.SetStatus(userCred, api.LB_STATUS_ENABLED, "")
+		lb.SetStatus(ctx, userCred, api.LB_STATUS_ENABLED, "")
 	}
 	return task.ScheduleRun(nil)
 }
@@ -413,25 +414,34 @@ func (self *SKVMRegionDriver) RequestDeleteLoadbalancer(ctx context.Context, use
 	return task.ScheduleRun(nil)
 }
 
-func (self *SKVMRegionDriver) RequestCreateLoadbalancerAcl(ctx context.Context, userCred mcclient.TokenCredential, lbacl *models.SCachedLoadbalancerAcl, task taskman.ITask) error {
+func (self *SKVMRegionDriver) RequestCreateLoadbalancerAcl(ctx context.Context, userCred mcclient.TokenCredential, lbacl *models.SLoadbalancerAcl, task taskman.ITask) error {
 	return task.ScheduleRun(nil)
 }
 
-func (self *SKVMRegionDriver) RequestSyncLoadbalancerAcl(ctx context.Context, userCred mcclient.TokenCredential, lbacl *models.SCachedLoadbalancerAcl, task taskman.ITask) error {
+func (self *SKVMRegionDriver) RequestUpdateLoadbalancerAcl(ctx context.Context, userCred mcclient.TokenCredential, lbacl *models.SLoadbalancerAcl, task taskman.ITask) error {
 	return task.ScheduleRun(nil)
 }
 
-func (self *SKVMRegionDriver) RequestDeleteLoadbalancerAcl(ctx context.Context, userCred mcclient.TokenCredential, lbacl *models.SCachedLoadbalancerAcl, task taskman.ITask) error {
+func (self *SKVMRegionDriver) RequestLoadbalancerAclSyncstatus(ctx context.Context, userCred mcclient.TokenCredential, lbacl *models.SLoadbalancerAcl, task taskman.ITask) error {
+	lbacl.SetStatus(ctx, userCred, apis.STATUS_AVAILABLE, "")
 	return task.ScheduleRun(nil)
 }
 
-func (self *SKVMRegionDriver) RequestCreateLoadbalancerCertificate(ctx context.Context, userCred mcclient.TokenCredential, lbcert *models.SCachedLoadbalancerCertificate, task taskman.ITask) error {
+func (self *SKVMRegionDriver) RequestDeleteLoadbalancerAcl(ctx context.Context, userCred mcclient.TokenCredential, lbacl *models.SLoadbalancerAcl, task taskman.ITask) error {
 	return task.ScheduleRun(nil)
 }
 
-func (self *SKVMRegionDriver) RequestDeleteLoadbalancerCertificate(ctx context.Context, userCred mcclient.TokenCredential, lbcert *models.SCachedLoadbalancerCertificate, task taskman.ITask) error {
-	task.ScheduleRun(nil)
-	return nil
+func (self *SKVMRegionDriver) RequestCreateLoadbalancerCertificate(ctx context.Context, userCred mcclient.TokenCredential, lbcert *models.SLoadbalancerCertificate, task taskman.ITask) error {
+	return task.ScheduleRun(nil)
+}
+
+func (self *SKVMRegionDriver) RequestDeleteLoadbalancerCertificate(ctx context.Context, userCred mcclient.TokenCredential, lbcert *models.SLoadbalancerCertificate, task taskman.ITask) error {
+	return task.ScheduleRun(nil)
+}
+
+func (self *SKVMRegionDriver) RequestLoadbalancerCertificateSyncstatus(ctx context.Context, userCred mcclient.TokenCredential, lbcert *models.SLoadbalancerCertificate, task taskman.ITask) error {
+	lbcert.SetStatus(ctx, userCred, apis.STATUS_AVAILABLE, "")
+	return task.ScheduleRun(nil)
 }
 
 func (self *SKVMRegionDriver) RequestCreateLoadbalancerBackendGroup(ctx context.Context, userCred mcclient.TokenCredential, lbbg *models.SLoadbalancerBackendGroup, task taskman.ITask) error {
@@ -484,9 +494,9 @@ func (self *SKVMRegionDriver) RequestStopLoadbalancerListener(ctx context.Contex
 func (self *SKVMRegionDriver) RequestSyncstatusLoadbalancerListener(ctx context.Context, userCred mcclient.TokenCredential, lblis *models.SLoadbalancerListener, task taskman.ITask) error {
 	originStatus, _ := task.GetParams().GetString("origin_status")
 	if utils.IsInStringArray(originStatus, []string{api.LB_STATUS_ENABLED, api.LB_STATUS_DISABLED}) {
-		lblis.SetStatus(userCred, originStatus, "")
+		lblis.SetStatus(ctx, userCred, originStatus, "")
 	} else {
-		lblis.SetStatus(userCred, api.LB_STATUS_ENABLED, "")
+		lblis.SetStatus(ctx, userCred, api.LB_STATUS_ENABLED, "")
 	}
 	task.ScheduleRun(nil)
 	return nil
@@ -537,7 +547,7 @@ func (self *SKVMRegionDriver) ValidateCreateEipData(ctx context.Context, userCre
 	}
 	var network *models.SNetwork
 	if input.NetworkId != "" {
-		_network, err := models.NetworkManager.FetchByIdOrName(userCred, input.NetworkId)
+		_network, err := models.NetworkManager.FetchByIdOrName(ctx, userCred, input.NetworkId)
 		if err != nil {
 			if err == sql.ErrNoRows {
 				return httperrors.NewResourceNotFoundError2("network", input.NetworkId)
@@ -580,7 +590,7 @@ func (self *SKVMRegionDriver) ValidateCreateEipData(ctx context.Context, userCre
 		if !network.Contains(input.IpAddr) {
 			return httperrors.NewInputParameterError("candidate %s out of range", input.IpAddr)
 		}
-		addrTable := network.GetUsedAddresses()
+		addrTable := network.GetUsedAddresses(ctx)
 		if _, ok := addrTable[input.IpAddr]; ok {
 			return httperrors.NewInputParameterError("requested ip %s is occupied!", input.IpAddr)
 		}
@@ -646,9 +656,15 @@ func (self *SKVMRegionDriver) RequestDeleteInstanceSnapshot(ctx context.Context,
 	}
 
 	params := jsonutils.NewDict()
+	taskParams := task.GetParams()
+	var deleteSnapshotTotalCnt int64 = 1
+	if taskParams.Contains("snapshot_total_count") {
+		deleteSnapshotTotalCnt, _ = taskParams.Int("snapshot_total_count")
+	}
+	deletedSnapshotCnt := deleteSnapshotTotalCnt - int64(len(snapshots))
 	params.Set("del_snapshot_id", jsonutils.NewString(snapshots[0].Id))
 	task.SetStage("OnKvmSnapshotDelete", params)
-	err = snapshots[0].StartSnapshotDeleteTask(ctx, task.GetUserCred(), false, task.GetTaskId())
+	err = snapshots[0].StartSnapshotDeleteTask(ctx, task.GetUserCred(), false, task.GetTaskId(), int(deleteSnapshotTotalCnt), int(deletedSnapshotCnt))
 	if err != nil {
 		return err
 	}
@@ -789,7 +805,7 @@ func (self *SKVMRegionDriver) RequestCreateInstanceSnapshot(ctx context.Context,
 
 		return models.SnapshotManager.CreateSnapshot(
 			ctx, task.GetUserCred(), api.SNAPSHOT_MANUAL, disks[diskIndex].DiskId,
-			guest.Id, "", snapshotName, -1, false)
+			guest.Id, "", snapshotName, -1, false, "")
 	}()
 	if err != nil {
 		return err
@@ -846,57 +862,6 @@ func (self *SKVMRegionDriver) OnDiskReset(ctx context.Context, userCred mcclient
 	return models.GetStorageDriver(storage.StorageType).OnDiskReset(ctx, userCred, disk, snapshot, data)
 }
 
-func (self *SKVMRegionDriver) RequestUpdateSnapshotPolicy(ctx context.Context,
-	userCred mcclient.TokenCredential, sp *models.SSnapshotPolicy, input cloudprovider.SnapshotPolicyInput,
-	task taskman.ITask) error {
-
-	return nil
-}
-
-func (self *SKVMRegionDriver) ValidateCreateSnapshopolicyDiskData(ctx context.Context,
-	userCred mcclient.TokenCredential, disk *models.SDisk, snapshotPolicy *models.SSnapshotPolicy) error {
-
-	err := self.SBaseRegionDriver.ValidateCreateSnapshopolicyDiskData(ctx, userCred, disk, snapshotPolicy)
-	if err != nil {
-		return err
-	}
-
-	if snapshotPolicy.RetentionDays < -1 || snapshotPolicy.RetentionDays == 0 || snapshotPolicy.RetentionDays > options.Options.RetentionDaysLimit {
-		return httperrors.NewInputParameterError("Retention days must in 1~%d or -1", options.Options.RetentionDaysLimit)
-	}
-
-	repeatWeekdays := models.SnapshotPolicyManager.RepeatWeekdaysToIntArray(snapshotPolicy.RepeatWeekdays)
-	timePoints := models.SnapshotPolicyManager.TimePointsToIntArray(snapshotPolicy.TimePoints)
-
-	if len(repeatWeekdays) > options.Options.RepeatWeekdaysLimit {
-		return httperrors.NewInputParameterError("repeat_weekdays only contains %d days at most",
-			options.Options.RepeatWeekdaysLimit)
-	}
-
-	if len(timePoints) > options.Options.TimePointsLimit {
-		return httperrors.NewInputParameterError("time_points only contains %d points at most", options.Options.TimePointsLimit)
-	}
-	return nil
-}
-
-func (self *SKVMRegionDriver) RequestApplySnapshotPolicy(ctx context.Context, userCred mcclient.TokenCredential, task taskman.ITask, disk *models.SDisk, sp *models.SSnapshotPolicy, data jsonutils.JSONObject) error {
-	taskman.LocalTaskRun(task, func() (jsonutils.JSONObject, error) {
-		data := jsonutils.NewDict()
-		data.Add(jsonutils.NewString(sp.GetId()), "snapshotpolicy_id")
-		return data, nil
-	})
-	return nil
-}
-
-func (self *SKVMRegionDriver) RequestCancelSnapshotPolicy(ctx context.Context, userCred mcclient.TokenCredential, task taskman.ITask, disk *models.SDisk, sp *models.SSnapshotPolicy, data jsonutils.JSONObject) error {
-	taskman.LocalTaskRun(task, func() (jsonutils.JSONObject, error) {
-		data := jsonutils.NewDict()
-		data.Add(jsonutils.NewString(sp.GetId()), "snapshotpolicy_id")
-		return data, nil
-	})
-	return nil
-}
-
 func (self *SKVMRegionDriver) OnSnapshotDelete(ctx context.Context, snapshot *models.SSnapshot, task taskman.ITask, data jsonutils.JSONObject) error {
 	task.SetStage("OnKvmSnapshotDelete", nil)
 	task.ScheduleRun(data)
@@ -923,7 +888,7 @@ func (self *SKVMRegionDriver) RequestSyncDiskStatus(ctx context.Context, userCre
 		originStatus, _ := task.GetParams().GetString("origin_status")
 		status, _ := res.GetString("status")
 		if status == api.DISK_EXIST {
-			if originStatus == api.DISK_UNKNOWN {
+			if sets.NewString(api.DISK_UNKNOWN, api.DISK_REBUILD_FAILED).Has(originStatus) {
 				diskStatus = api.DISK_READY
 			} else {
 				diskStatus = originStatus
@@ -931,7 +896,7 @@ func (self *SKVMRegionDriver) RequestSyncDiskStatus(ctx context.Context, userCre
 		} else {
 			diskStatus = api.DISK_UNKNOWN
 		}
-		return nil, disk.SetStatus(userCred, diskStatus, "sync status")
+		return nil, disk.SetStatus(ctx, userCred, diskStatus, "sync status")
 	})
 	return nil
 }
@@ -982,17 +947,11 @@ func (self *SKVMRegionDriver) RequestPackInstanceBackup(ctx context.Context, ib 
 	if err != nil {
 		return errors.Wrap(err, "unable to get backups")
 	}
-	storage, err := backups[0].GetStorage()
+	host, err := models.HostManager.GetEnabledKvmHostForDiskBackup(&backups[0])
 	if err != nil {
-		return errors.Wrapf(err, "GetStorage")
+		return errors.Wrap(err, "GetEnabledKvmHostForDiskBackup")
 	}
-	host, _ := storage.GetMasterHost()
-	if host == nil {
-		host, err = models.HostManager.GetEnabledKvmHost()
-		if err != nil {
-			return errors.Wrap(err, "unable to GetEnabledKvmHost")
-		}
-	}
+
 	backupIds := make([]string, len(backups))
 	for i := range backupIds {
 		backupIds[i] = backups[i].GetId()
@@ -1026,7 +985,7 @@ func (self *SKVMRegionDriver) RequestUnpackInstanceBackup(ctx context.Context, i
 	if err != nil {
 		return errors.Wrap(err, "unable to get backupStorage")
 	}
-	host, err := models.HostManager.GetEnabledKvmHost()
+	host, err := models.HostManager.GetEnabledKvmHostForBackupStorage(backupStorage)
 	if err != nil {
 		return errors.Wrap(err, "unable to GetEnabledKvmHost")
 	}
@@ -1053,9 +1012,9 @@ func (self *SKVMRegionDriver) RequestUnpackInstanceBackup(ctx context.Context, i
 
 func (self *SKVMRegionDriver) RequestSyncBackupStorageStatus(ctx context.Context, userCred mcclient.TokenCredential, bs *models.SBackupStorage, task taskman.ITask) error {
 	taskman.LocalTaskRun(task, func() (jsonutils.JSONObject, error) {
-		host, err := models.HostManager.GetEnabledKvmHost()
+		host, err := models.HostManager.GetEnabledKvmHostForBackupStorage(bs)
 		if err != nil {
-			return nil, errors.Wrap(err, "unable to GetEnabledKvmHost")
+			return nil, errors.Wrap(err, "GetEnabledKvmHostForBackupStorage")
 		}
 		url := fmt.Sprintf("%s/storages/sync-backup-storage", host.ManagerUri)
 		body := jsonutils.NewDict()
@@ -1072,7 +1031,7 @@ func (self *SKVMRegionDriver) RequestSyncBackupStorageStatus(ctx context.Context
 		}
 		status, _ := res.GetString("status")
 		reason, _ := res.GetString("reason")
-		return nil, bs.SetStatus(userCred, status, reason)
+		return nil, bs.SetStatus(ctx, userCred, status, reason)
 	})
 	return nil
 }
@@ -1088,7 +1047,7 @@ func (self *SKVMRegionDriver) RequestSyncInstanceBackupStatus(ctx context.Contex
 		api.INSTANCE_BACKUP_STATUS_SAVING,
 		api.INSTANCE_BACKUP_STATUS_SNAPSHOT,
 	}) {
-		err := ib.SetStatus(userCred, originStatus, "sync status")
+		err := ib.SetStatus(ctx, userCred, originStatus, "sync status")
 		if err != nil {
 			return err
 		}
@@ -1119,13 +1078,13 @@ func (self *SKVMRegionDriver) RequestSyncDiskBackupStatus(ctx context.Context, u
 	taskman.LocalTaskRun(task, func() (jsonutils.JSONObject, error) {
 		originStatus, _ := task.GetParams().GetString("origin_status")
 		if utils.IsInStringArray(originStatus, []string{api.BACKUP_STATUS_CREATING, api.BACKUP_STATUS_SNAPSHOT, api.BACKUP_STATUS_SAVING, api.BACKUP_STATUS_CLEANUP_SNAPSHOT, api.BACKUP_STATUS_DELETING}) {
-			return nil, backup.SetStatus(userCred, originStatus, "sync status")
+			return nil, backup.SetStatus(ctx, userCred, originStatus, "sync status")
 		}
 		backupStorage, err := backup.GetBackupStorage()
 		if err != nil {
 			return nil, errors.Wrap(err, "unable to get backupStorage")
 		}
-		storage, _ := backup.GetStorage()
+		/*storage, _ := backup.GetStorage()
 		var host *models.SHost
 		if storage != nil {
 			host, _ = storage.GetMasterHost()
@@ -1135,6 +1094,10 @@ func (self *SKVMRegionDriver) RequestSyncDiskBackupStatus(ctx context.Context, u
 			if err != nil {
 				return nil, errors.Wrap(err, "unable to GetEnabledKvmHost")
 			}
+		}*/
+		host, err := models.HostManager.GetEnabledKvmHostForDiskBackup(backup)
+		if err != nil {
+			return nil, errors.Wrap(err, "GetEnabledKvmHostForDiskBackup")
 		}
 		log.Infof("host: %s, ManagerUri: %s", host.GetId(), host.ManagerUri)
 		url := fmt.Sprintf("%s/storages/sync-backup", host.ManagerUri)
@@ -1158,7 +1121,7 @@ func (self *SKVMRegionDriver) RequestSyncDiskBackupStatus(ctx context.Context, u
 		} else {
 			backupStatus = api.BACKUP_STATUS_UNKNOWN
 		}
-		return nil, backup.SetStatus(userCred, backupStatus, "sync status")
+		return nil, backup.SetStatus(ctx, userCred, backupStatus, "sync status")
 	})
 	return nil
 }
@@ -1188,23 +1151,13 @@ func (self *SKVMRegionDriver) RequestSyncSnapshotStatus(ctx context.Context, use
 		} else {
 			snapshotStatus = api.SNAPSHOT_UNKNOWN
 		}
-		return nil, snapshot.SetStatus(userCred, snapshotStatus, "sync status")
+		return nil, snapshot.SetStatus(ctx, userCred, snapshotStatus, "sync status")
 	})
 	return nil
 }
 
 func (self *SKVMRegionDriver) RequestAssociateEipForNAT(ctx context.Context, userCred mcclient.TokenCredential, nat *models.SNatGateway, eip *models.SElasticip, task taskman.ITask) error {
 	return errors.Wrapf(cloudprovider.ErrNotSupported, "RequestAssociateEipForNAT")
-}
-
-func (self *SKVMRegionDriver) RequestPreSnapshotPolicyApply(ctx context.Context, userCred mcclient.
-	TokenCredential, task taskman.ITask, disk *models.SDisk, sp *models.SSnapshotPolicy, data jsonutils.JSONObject) error {
-
-	taskman.LocalTaskRun(task, func() (jsonutils.JSONObject, error) {
-
-		return data, nil
-	})
-	return nil
 }
 
 func (self *SKVMRegionDriver) ValidateCacheSecgroup(ctx context.Context, userCred mcclient.TokenCredential, secgroup *models.SSecurityGroup, vpc *models.SVpc, classic bool) error {
@@ -1334,7 +1287,7 @@ func (self *SKVMRegionDriver) RequestSyncBucketStatus(ctx context.Context, userC
 			return nil, errors.Wrap(err, "bucket.GetIBucket")
 		}
 
-		return nil, bucket.SetStatus(userCred, iBucket.GetStatus(), "syncstatus")
+		return nil, bucket.SetStatus(ctx, userCred, iBucket.GetStatus(), "syncstatus")
 	})
 	return nil
 }
@@ -1352,17 +1305,11 @@ func (self *SKVMRegionDriver) RequestDeleteBackup(ctx context.Context, backup *m
 	if err != nil {
 		return errors.Wrap(err, "unable to get backupStorage")
 	}
-	storage, _ := backup.GetStorage()
-	var host *models.SHost
-	if storage != nil {
-		host, _ = storage.GetMasterHost()
+	host, err := models.HostManager.GetEnabledKvmHostForDiskBackup(backup)
+	if err != nil {
+		return errors.Wrap(err, "GetEnabledKvmHostForDiskBackup")
 	}
-	if host == nil {
-		host, err = models.HostManager.GetEnabledKvmHost()
-		if err != nil {
-			return errors.Wrap(err, "unable to GetEnabledKvmHost")
-		}
-	}
+
 	url := fmt.Sprintf("%s/storages/delete-backup", host.ManagerUri)
 	body := jsonutils.NewDict()
 	body.Set("backup_id", jsonutils.NewString(backup.GetId()))
@@ -1397,10 +1344,18 @@ func (self *SKVMRegionDriver) RequestCreateBackup(ctx context.Context, backup *m
 	if err != nil {
 		return errors.Wrap(err, "unable to get storage")
 	}
+	snapshotObj, err := models.SnapshotManager.FetchById(snapshotId)
+	if err != nil {
+		return errors.Wrap(err, "fetch snapshot")
+	}
+	snapshot := snapshotObj.(*models.SSnapshot)
 	host, _ := guest.GetHost()
 	url := fmt.Sprintf("%s/disks/%s/backup/%s", host.ManagerUri, storage.Id, disk.Id)
 	body := jsonutils.NewDict()
 	body.Set("snapshot_id", jsonutils.NewString(snapshotId))
+	if snapshot.Location != "" {
+		body.Set("snapshot_location", jsonutils.NewString(snapshot.Location))
+	}
 	body.Set("backup_id", jsonutils.NewString(backup.GetId()))
 	body.Set("backup_storage_id", jsonutils.NewString(backupStorage.GetId()))
 	accessInfo, err := backupStorage.GetAccessInfo()
@@ -1443,7 +1398,7 @@ func (self *SKVMRegionDriver) RequestAssociateEip(ctx context.Context, userCred 
 		default:
 			return nil, errors.Wrapf(cloudprovider.ErrNotSupported, "instance type %s", input.InstanceType)
 		}
-		if err := eip.SetStatus(userCred, api.EIP_STATUS_READY, api.EIP_STATUS_ASSOCIATE); err != nil {
+		if err := eip.SetStatus(ctx, userCred, api.EIP_STATUS_READY, api.EIP_STATUS_ASSOCIATE); err != nil {
 			return nil, errors.Wrapf(err, "set eip status to %s", api.EIP_STATUS_READY)
 		}
 		return nil, nil
@@ -1526,8 +1481,8 @@ func (self *SKVMRegionDriver) requestAssociateEipWithInstanceGroup(ctx context.C
 		groupnic.EipId = eip.Id
 		return nil
 	}); err != nil {
-		return errors.Wrapf(err, "set associated eip for groupnic %s (guest:%s, network:%s)",
-			groupnic.IpAddr, groupnic.GroupId, groupnic.NetworkId)
+		return errors.Wrapf(err, "set associated eip for groupnic %s/%s (guest:%s, network:%s)",
+			groupnic.IpAddr, groupnic.Ip6Addr, groupnic.GroupId, groupnic.NetworkId)
 	}
 	return nil
 }
@@ -1553,7 +1508,7 @@ func (self *SKVMRegionDriver) requestAssociateEipWithLoadbalancer(
 	if err := eip.AssociateLoadbalancer(ctx, userCred, lb); err != nil {
 		return errors.Wrapf(err, "associate eip %s(%s) to loadbalancer %s(%s)", eip.Name, eip.Id, lb.Name, lb.Id)
 	}
-	if err := eip.SetStatus(userCred, api.EIP_STATUS_READY, api.EIP_STATUS_ASSOCIATE); err != nil {
+	if err := eip.SetStatus(ctx, userCred, api.EIP_STATUS_READY, api.EIP_STATUS_ASSOCIATE); err != nil {
 		return errors.Wrapf(err, "set eip status to %s", api.EIP_STATUS_ALLOCATE)
 	}
 	return nil
@@ -1585,7 +1540,7 @@ func (self *SKVMRegionDriver) RequestCreateSecurityGroup(
 		rule.SecgroupId = secgroup.Id
 		models.SecurityGroupRuleManager.TableSpec().Insert(ctx, rule)
 	}
-	secgroup.SetStatus(userCred, api.SECGROUP_STATUS_READY, "")
+	secgroup.SetStatus(ctx, userCred, api.SECGROUP_STATUS_READY, "")
 	return nil
 }
 
@@ -1633,12 +1588,44 @@ func (self *SKVMRegionDriver) ValidateUpdateSecurityGroupRuleInput(ctx context.C
 		}
 	}
 
-	if input.CIDR != nil {
-		_, _, err := net.ParseCIDR(*input.CIDR)
-		if err != nil {
-			return nil, httperrors.NewInputParameterError("invalid cidr %s", *input.CIDR)
-		}
+	if input.CIDR != nil && len(*input.CIDR) > 0 && !regutils.MatchCIDR(*input.CIDR) && !regutils.MatchIP4Addr(*input.CIDR) && !regutils.MatchCIDR6(*input.CIDR) && !regutils.MatchIP6Addr(*input.CIDR) {
+		return nil, httperrors.NewInputParameterError("invalid cidr %s", *input.CIDR)
 	}
 
 	return input, nil
+}
+
+func (self *SKVMRegionDriver) ValidateCreateSnapshotPolicy(ctx context.Context, userCred mcclient.TokenCredential, region *models.SCloudregion, input *api.SSnapshotPolicyCreateInput) (*api.SSnapshotPolicyCreateInput, error) {
+	return input, nil
+}
+
+func (self *SKVMRegionDriver) RequestCreateSnapshotPolicy(ctx context.Context, userCred mcclient.TokenCredential, region *models.SCloudregion, sp *models.SSnapshotPolicy, task taskman.ITask) error {
+	sp.SetStatus(ctx, userCred, apis.STATUS_AVAILABLE, "")
+	return task.ScheduleRun(nil)
+}
+
+func (self *SKVMRegionDriver) RequestDeleteSnapshotPolicy(ctx context.Context, userCred mcclient.TokenCredential, region *models.SCloudregion, sp *models.SSnapshotPolicy, task taskman.ITask) error {
+	return task.ScheduleRun(nil)
+}
+
+func (self *SKVMRegionDriver) RequestSnapshotPolicyBindDisks(ctx context.Context, userCred mcclient.TokenCredential, sp *models.SSnapshotPolicy, diskIds []string, task taskman.ITask) error {
+	taskman.LocalTaskRun(task, func() (jsonutils.JSONObject, error) {
+		disks, err := sp.GetUnbindDisks(diskIds)
+		if err != nil {
+			return nil, errors.Wrapf(err, "GetUnbindDisks")
+		}
+		ids := []string{}
+		for _, disk := range disks {
+			ids = append(ids, disk.Id)
+		}
+		return nil, sp.BindDisks(ctx, disks)
+	})
+	return nil
+}
+
+func (self *SKVMRegionDriver) RequestSnapshotPolicyUnbindDisks(ctx context.Context, userCred mcclient.TokenCredential, sp *models.SSnapshotPolicy, diskIds []string, task taskman.ITask) error {
+	taskman.LocalTaskRun(task, func() (jsonutils.JSONObject, error) {
+		return nil, sp.UnbindDisks(diskIds)
+	})
+	return nil
 }

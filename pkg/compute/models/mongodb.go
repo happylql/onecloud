@@ -43,6 +43,8 @@ import (
 	"yunion.io/x/onecloud/pkg/util/stringutils2"
 )
 
+// +onecloud:swagger-gen-model-singular=mongodb
+// +onecloud:swagger-gen-model-plural=mongodbs
 type SMongoDBManager struct {
 	db.SVirtualResourceBaseManager
 	db.SExternalizedResourceBaseManager
@@ -386,10 +388,10 @@ func (self *SMongoDB) StartDeleteTask(ctx context.Context, userCred mcclient.Tok
 		return task.ScheduleRun(nil)
 	}()
 	if err != nil {
-		self.SetStatus(userCred, api.MONGO_DB_STATUS_DELETE_FAILED, err.Error())
+		self.SetStatus(ctx, userCred, api.MONGO_DB_STATUS_DELETE_FAILED, err.Error())
 		return err
 	}
-	return self.SetStatus(userCred, api.MONGO_DB_STATUS_DELETING, "")
+	return self.SetStatus(ctx, userCred, api.MONGO_DB_STATUS_DELETING, "")
 }
 
 func (self *SCloudregion) GetMongoDBs(managerId string) ([]SMongoDB, error) {
@@ -572,7 +574,7 @@ func (self *SMongoDB) SyncWithCloudMongoDB(ctx context.Context, userCred mcclien
 		syncVirtualResourceMetadata(ctx, userCred, self, ext, account.ReadOnly)
 	}
 	if provider := self.GetCloudprovider(); provider != nil {
-		SyncCloudProject(ctx, userCred, self, provider.GetOwnerId(), ext, provider.Id)
+		SyncCloudProject(ctx, userCred, self, provider.GetOwnerId(), ext, provider)
 	}
 	db.OpsLog.LogSyncUpdate(self, diff, userCred)
 	return nil
@@ -667,7 +669,7 @@ func (self *SCloudregion) newFromCloudMongoDB(ctx context.Context, userCred mccl
 	})
 
 	syncVirtualResourceMetadata(ctx, userCred, &ins, ext, false)
-	SyncCloudProject(ctx, userCred, &ins, provider.GetOwnerId(), ext, provider.Id)
+	SyncCloudProject(ctx, userCred, &ins, provider.GetOwnerId(), ext, provider)
 	db.OpsLog.LogEvent(&ins, db.ACT_CREATE, ins.GetShortDesc(ctx), userCred)
 
 	return &ins, nil
@@ -680,6 +682,7 @@ type SMongoDBCountStat struct {
 }
 
 func (man *SMongoDBManager) TotalCount(
+	ctx context.Context,
 	scope rbacscope.TRbacScope,
 	ownerId mcclient.IIdentityProvider,
 	rangeObjs []db.IStandaloneModel,
@@ -691,7 +694,7 @@ func (man *SMongoDBManager) TotalCount(
 	mgq = scopeOwnerIdFilter(mgq, scope, ownerId)
 	mgq = CloudProviderFilter(mgq, mgq.Field("manager_id"), providers, brands, cloudEnv)
 	mgq = RangeObjectsFilter(mgq, rangeObjs, mgq.Field("cloudregion_id"), nil, mgq.Field("manager_id"), nil, nil)
-	mgq = db.ObjectIdQueryWithPolicyResult(mgq, man, policyResult)
+	mgq = db.ObjectIdQueryWithPolicyResult(ctx, mgq, man, policyResult)
 
 	sq := mgq.SubQuery()
 	q := sq.Query(sqlchemy.COUNT("total_mongodb_count"),
@@ -829,7 +832,7 @@ func (self *SMongoDB) StartRemoteUpdateTask(ctx context.Context, userCred mcclie
 	if err != nil {
 		return errors.Wrap(err, "NewTask")
 	}
-	self.SetStatus(userCred, apis.STATUS_UPDATE_TAGS, "StartRemoteUpdateTask")
+	self.SetStatus(ctx, userCred, apis.STATUS_UPDATE_TAGS, "StartRemoteUpdateTask")
 	return task.ScheduleRun(nil)
 }
 

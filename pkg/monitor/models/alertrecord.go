@@ -23,7 +23,6 @@ import (
 	"yunion.io/x/jsonutils"
 	"yunion.io/x/log"
 	"yunion.io/x/pkg/errors"
-	"yunion.io/x/pkg/util/filterclause"
 	"yunion.io/x/pkg/util/rbacscope"
 	"yunion.io/x/pkg/util/timeutils"
 	"yunion.io/x/sqlchemy"
@@ -32,6 +31,7 @@ import (
 	"yunion.io/x/onecloud/pkg/cloudcommon/db"
 	"yunion.io/x/onecloud/pkg/httperrors"
 	"yunion.io/x/onecloud/pkg/mcclient"
+	"yunion.io/x/onecloud/pkg/util/filterclause"
 	"yunion.io/x/onecloud/pkg/util/stringutils2"
 )
 
@@ -55,8 +55,8 @@ type SAlertRecord struct {
 	Level     string               `charset:"ascii" width:"36" nullable:"false" default:"normal" list:"user" update:"user"`
 	State     string               `width:"36" charset:"ascii" nullable:"false" default:"unknown" list:"user" update:"user"`
 	SendState string               `width:"36" charset:"ascii" default:"ok" list:"user" update:"user"`
-	EvalData  jsonutils.JSONObject `list:"user" update:"user" length:""`
-	AlertRule jsonutils.JSONObject `list:"user" update:"user" length:""`
+	EvalData  jsonutils.JSONObject `list:"user" update:"user" length:"medium"`
+	AlertRule jsonutils.JSONObject `list:"user" update:"user" length:"medium"`
 	ResType   string               `width:"36" list:"user" update:"user"`
 }
 
@@ -157,6 +157,35 @@ func (man *SAlertRecordManager) getAlertingRecordQuery() *sqlchemy.SQuery {
 	recordQuery.GroupBy("alert_id")
 	return recordQuery
 
+}
+
+func (man *SAlertRecordManager) CustomizeFilterList(ctx context.Context, q *sqlchemy.SQuery, userCred mcclient.TokenCredential, query jsonutils.JSONObject) (*db.CustomizeListFilters, error) {
+	filters := db.NewCustomizeListFilters()
+
+	input := new(monitor.AlertRecordListInput)
+	if err := query.Unmarshal(input); err != nil {
+		return nil, errors.Wrap(err, "AlertRecordManager.CustomizeFilterList.Unmarshal")
+	}
+	if input.ResId != "" {
+		filters.Append(func(item jsonutils.JSONObject) (bool, error) {
+			evalMatchs := make([]monitor.EvalMatch, 0)
+			if item.Contains("eval_data") {
+				err := item.Unmarshal(&evalMatchs, "eval_data")
+				if err != nil {
+					return false, errors.Wrap(err, "record Unmarshal evalMatchs error")
+				}
+				for _, match := range evalMatchs {
+					for k, v := range match.Tags {
+						if strings.HasSuffix(k, "_id") && v == input.ResId {
+							return true, nil
+						}
+					}
+				}
+			}
+			return false, nil
+		})
+	}
+	return filters, nil
 }
 
 func (man *SAlertRecordManager) GetAlertRecord(id string) (*SAlertRecord, error) {
@@ -332,9 +361,9 @@ getNewMatchTag:
 
 func (record *SAlertRecord) PostCreate(ctx context.Context, userCred mcclient.TokenCredential, ownerId mcclient.IIdentityProvider, query jsonutils.JSONObject, data jsonutils.JSONObject) {
 	record.SStatusStandaloneResourceBase.PostCreate(ctx, userCred, ownerId, query, data)
-	err := MonitorResourceManager.UpdateMonitorResourceAttachJoint(ctx, userCred, record)
+	err := MonitorResourceManager.UpdateMonitorResourceAttachJointByRecord(ctx, userCred, record)
 	if err != nil {
-		log.Errorf("UpdateMonitorResourceAttachJoint error: %v", err)
+		log.Errorf("UpdateMonitorResourceAttachJointByRecord error: %v", err)
 	}
 	if err := GetAlertResourceManager().ReconcileFromRecord(ctx, userCred, ownerId, record); err != nil {
 		log.Errorf("Reconcile from alert record error: %v", err)
@@ -357,7 +386,6 @@ func (manager *SAlertRecordManager) DeleteRecordsOfThirtyDaysAgo(ctx context.Con
 	records := make([]SAlertRecord, 0)
 	query := manager.Query()
 	query = query.LE("created_at", timeutils.MysqlTime(time.Now().Add(-time.Hour*24*30)))
-	log.Errorf("query:%s", query.String())
 	err := db.FetchModelObjects(manager, query, &records)
 	if err != nil {
 		log.Errorf("fetch records ofthirty days ago err:%v", err)
@@ -366,7 +394,7 @@ func (manager *SAlertRecordManager) DeleteRecordsOfThirtyDaysAgo(ctx context.Con
 	for i, _ := range records {
 		err := db.DeleteModel(ctx, userCred, &records[i])
 		if err != nil {
-			log.Errorf("delete expire record:%s err:%v", records[i].GetId(), err)
+			log.Errorf("delete expire record: %s err: %v", records[i].GetId(), err)
 		}
 	}
 }
@@ -405,7 +433,7 @@ func (manager *SAlertRecordManager) getNowAlertingRecord(ctx context.Context, us
 	input monitor.AlertRecordListInput) ([]SAlertRecord, error) {
 	//now := time.Now()
 	//startTime := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 1, now.Location())
-	ownerId, err := manager.FetchOwnerId(context.Background(), jsonutils.Marshal(&input))
+	ownerId, err := manager.FetchOwnerId(ctx, jsonutils.Marshal(&input))
 	if err != nil {
 		return nil, errors.Wrap(err, "FetchOwnerId error")
 	}
@@ -413,7 +441,7 @@ func (manager *SAlertRecordManager) getNowAlertingRecord(ctx context.Context, us
 		ownerId = userCred
 	}
 	query := manager.Query()
-	query = manager.FilterByOwner(query, manager, userCred, ownerId, rbacscope.String2Scope(input.Scope))
+	query = manager.FilterByOwner(ctx, query, manager, userCred, ownerId, rbacscope.String2Scope(input.Scope))
 	//query = query.GE("created_at", startTime.UTC().Format(timeutils.MysqlTimeFormat))
 	query = query.Equals("state", monitor.AlertStateAlerting)
 	query = query.IsNotNull("res_type").IsNotEmpty("res_type").Desc("created_at")
@@ -424,7 +452,7 @@ func (manager *SAlertRecordManager) getNowAlertingRecord(ctx context.Context, us
 
 	alertsQuery := CommonAlertManager.Query("id").Equals("state", monitor.AlertStateAlerting).IsTrue("enabled").
 		IsNull("used_by")
-	alertsQuery = CommonAlertManager.FilterByOwner(alertsQuery, CommonAlertManager, userCred, userCred, rbacscope.String2Scope(input.Scope))
+	alertsQuery = CommonAlertManager.FilterByOwner(ctx, alertsQuery, CommonAlertManager, userCred, userCred, rbacscope.String2Scope(input.Scope))
 	alerts := make([]SCommonAlert, 0)
 	records := make([]SAlertRecord, 0)
 	err = db.FetchModelObjects(CommonAlertManager, alertsQuery, &alerts)

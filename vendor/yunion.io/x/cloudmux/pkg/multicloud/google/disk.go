@@ -191,15 +191,6 @@ func (disk *SDisk) GetISnapshot(id string) (cloudprovider.ICloudSnapshot, error)
 	return disk.storage.zone.region.GetSnapshot(id)
 }
 
-func (disk *SDisk) GetExtSnapshotPolicyIds() ([]string, error) {
-	result := []string{}
-	for _, policy := range disk.ResourcePolicies {
-		globalId := strings.TrimPrefix(policy, fmt.Sprintf("%s/%s/", GOOGLE_COMPUTE_DOMAIN, GOOGLE_API_VERSION))
-		result = append(result, globalId)
-	}
-	return result, nil
-}
-
 func (disk *SDisk) Resize(ctx context.Context, newSizeMB int64) error {
 	return disk.storage.zone.region.ResizeDisk(disk.SelfLink, int(newSizeMB>>10))
 }
@@ -239,10 +230,9 @@ func (region *SRegion) CreateDisk(name string, sizeGb int, zone string, storageT
 		// projects/my-project-15390453537169/zones/us-west2-c/diskTypes/pd-standard
 		"type": storageType,
 	}
+	body["sizeGb"] = sizeGb
 	if len(image) > 0 {
 		body["sourceImage"] = image
-	} else {
-		body["sizeGb"] = sizeGb
 	}
 	disk := &SDisk{}
 	resource := fmt.Sprintf("zones/%s/disks", zone)

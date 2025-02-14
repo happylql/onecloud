@@ -138,7 +138,7 @@ func (self *SInstance) GetName() string {
 }
 
 func (self *SInstance) GetHostname() string {
-	return self.GetName()
+	return ""
 }
 
 func (self *SInstance) GetGlobalId() string {
@@ -182,28 +182,6 @@ func (self *SInstance) Refresh() error {
 
 	new.host = self.host
 	return jsonutils.Update(self, new)
-}
-
-func (self *SInstance) IsEmulated() bool {
-	return false
-}
-
-func (self *SInstance) GetSysTags() map[string]string {
-	data := map[string]string{}
-	// todo: add price key here
-	data["zone_ext_id"] = self.host.zone.GetGlobalId()
-	if len(self.BasicImageID) > 0 {
-		if image, err := self.host.zone.region.GetImage(self.BasicImageID); err != nil {
-			log.Errorf("Failed to find image %s for instance %s", self.BasicImageID, self.GetName())
-		} else {
-			meta := image.GetSysTags()
-			for k, v := range meta {
-				data[k] = v
-			}
-		}
-	}
-
-	return data
 }
 
 // 计费模式，枚举值为： Year，按年付费； Month，按月付费； Dynamic，按需付费（需开启权限）；
@@ -505,12 +483,12 @@ func (self *SInstance) RebuildRoot(ctx context.Context, desc *cloudprovider.SMan
 	}
 }
 
-func (self *SInstance) DeployVM(ctx context.Context, name string, username string, password string, publicKey string, deleteKeypair bool, description string) error {
-	if len(publicKey) > 0 {
+func (self *SInstance) DeployVM(ctx context.Context, opts *cloudprovider.SInstanceDeployOptions) error {
+	if len(opts.PublicKey) > 0 {
 		return fmt.Errorf("DeployVM not support assign ssh keypair")
 	}
 
-	if deleteKeypair {
+	if opts.DeleteKeypair {
 		return fmt.Errorf("DeployVM not support delete ssh keypair")
 	}
 
@@ -518,8 +496,8 @@ func (self *SInstance) DeployVM(ctx context.Context, name string, username strin
 		return fmt.Errorf("DeployVM instance status %s , expected %s.", self.GetStatus(), api.VM_READY)
 	}
 
-	if len(password) > 0 {
-		err := self.host.zone.region.ResetVMPasswd(self.GetId(), password)
+	if len(opts.Password) > 0 {
+		err := self.host.zone.region.ResetVMPasswd(self.GetId(), opts.Password)
 		if err != nil {
 			return err
 		}

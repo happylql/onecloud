@@ -41,7 +41,7 @@ func (self *GuestSaveImageTask) OnInit(ctx context.Context, obj db.IStandaloneMo
 	restart := jsonutils.QueryBoolean(self.Params, "restart", false)
 	if restart && guest.Status != api.VM_READY {
 		self.SetStage("OnStopServerComplete", nil)
-		guest.StartGuestStopTask(ctx, self.GetUserCred(), false, false, self.GetTaskId())
+		guest.StartGuestStopTask(ctx, self.GetUserCred(), 60, false, false, self.GetTaskId())
 		return
 	}
 	self.OnStopServerComplete(ctx, guest, nil)
@@ -49,7 +49,12 @@ func (self *GuestSaveImageTask) OnInit(ctx context.Context, obj db.IStandaloneMo
 
 func (self *GuestSaveImageTask) OnStopServerComplete(ctx context.Context, guest *models.SGuest, body jsonutils.JSONObject) {
 	self.SetStage("OnSaveRootImageComplete", nil)
-	err := guest.GetDriver().RequestSaveImage(ctx, self.GetUserCred(), guest, self)
+	drv, err := guest.GetDriver()
+	if err != nil {
+		self.OnSaveRootImageCompleteFailed(ctx, guest, jsonutils.NewString(err.Error()))
+		return
+	}
+	err = drv.RequestSaveImage(ctx, self.GetUserCred(), guest, self)
 	if err != nil {
 		self.OnSaveRootImageCompleteFailed(ctx, guest, jsonutils.NewString(err.Error()))
 		return
@@ -57,7 +62,7 @@ func (self *GuestSaveImageTask) OnStopServerComplete(ctx context.Context, guest 
 }
 
 func (self *GuestSaveImageTask) OnStopServerCompleteFailed(ctx context.Context, guest *models.SGuest, body jsonutils.JSONObject) {
-	guest.SetStatus(self.GetUserCred(), api.VM_SAVE_DISK_FAILED, body.String())
+	guest.SetStatus(ctx, self.GetUserCred(), api.VM_SAVE_DISK_FAILED, body.String())
 	self.SetStageFailed(ctx, nil)
 }
 
@@ -75,7 +80,7 @@ func (self *GuestSaveImageTask) OnSaveRootImageComplete(ctx context.Context, gue
 
 func (self *GuestSaveImageTask) OnSaveRootImageCompleteFailed(ctx context.Context, guest *models.SGuest, data jsonutils.JSONObject) {
 	logclient.AddActionLogWithStartable(self, guest, logclient.ACT_SAVE_IMAGE, data, self.UserCred, false)
-	guest.SetStatus(self.GetUserCred(), api.VM_SAVE_DISK_FAILED, data.String())
+	guest.SetStatus(ctx, self.GetUserCred(), api.VM_SAVE_DISK_FAILED, data.String())
 	self.SetStageFailed(ctx, data)
 }
 

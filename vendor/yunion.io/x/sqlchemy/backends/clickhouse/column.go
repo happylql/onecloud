@@ -403,7 +403,10 @@ type SDecimalColumn struct {
 // ColType implementation of SDecimalColumn for IColumnSpec
 func (c *SDecimalColumn) ColType() string {
 	str := c.SClickhouseBaseColumn.ColType()
-	return fmt.Sprintf("%s(%d, %d)", str, c.width, c.Precision)
+	if str == "Decimal" {
+		return fmt.Sprintf("%s(%d, %d)", str, c.width, c.Precision)
+	}
+	return fmt.Sprintf("%s(%d)", str, c.Precision)
 }
 
 // IsNumeric implementation of SDecimalColumn for IColumnSpec
@@ -603,6 +606,12 @@ type SDateTimeColumn struct {
 
 	// Is this column a 'updated_at' field, whichi records the time when this record was updated
 	isUpdatedAt bool
+}
+
+// DefinitionString implementation of SDateTimeColumn for IColumnSpec
+func (c *SDateTimeColumn) DefinitionString() string {
+	buf := columnDefinitionBuffer(c)
+	return buf.String()
 }
 
 func (c *SDateTimeColumn) IsCreatedAt() bool {

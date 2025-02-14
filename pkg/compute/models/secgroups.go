@@ -50,6 +50,8 @@ import (
 	"yunion.io/x/onecloud/pkg/util/stringutils2"
 )
 
+// +onecloud:swagger-gen-model-singular=secgroup
+// +onecloud:swagger-gen-model-plural=secgroups
 type SSecurityGroupManager struct {
 	db.SSharableVirtualResourceBaseManager
 	db.SExternalizedResourceBaseManager
@@ -125,7 +127,7 @@ func (manager *SSecurityGroupManager) ListItemFilter(
 		return nil, errors.Wrap(err, "SCloudregionResourceBaseManager.ListItemFilter")
 	}
 	if len(input.VpcId) > 0 {
-		vpcObj, err := validators.ValidateModel(userCred, VpcManager, &input.VpcId)
+		vpcObj, err := validators.ValidateModel(ctx, userCred, VpcManager, &input.VpcId)
 		if err != nil {
 			return nil, err
 		}
@@ -143,7 +145,7 @@ func (manager *SSecurityGroupManager) ListItemFilter(
 
 	serverStr := input.ServerId
 	if len(serverStr) > 0 {
-		guest, _, err := ValidateGuestResourceInput(userCred, input.ServerResourceInput)
+		guest, _, err := ValidateGuestResourceInput(ctx, userCred, input.ServerResourceInput)
 		if err != nil {
 			return nil, errors.Wrap(err, "ValidateGuestResourceInput")
 		}
@@ -166,7 +168,7 @@ func (manager *SSecurityGroupManager) ListItemFilter(
 	}
 
 	if len(input.DBInstanceId) > 0 {
-		_, err = validators.ValidateModel(userCred, DBInstanceManager, &input.DBInstanceId)
+		_, err = validators.ValidateModel(ctx, userCred, DBInstanceManager, &input.DBInstanceId)
 		if err != nil {
 			return nil, err
 		}
@@ -174,8 +176,17 @@ func (manager *SSecurityGroupManager) ListItemFilter(
 		q = q.In("id", sq.SubQuery())
 	}
 
+	if len(input.LoadbalancerId) > 0 {
+		_, err = validators.ValidateModel(ctx, userCred, LoadbalancerManager, &input.LoadbalancerId)
+		if err != nil {
+			return nil, err
+		}
+		sq := LoadbalancerSecurityGroupManager.Query("secgroup_id").Equals("loadbalancer_id", input.LoadbalancerId)
+		q = q.In("id", sq.SubQuery())
+	}
+
 	if len(input.ElasticcacheId) > 0 {
-		_, err = validators.ValidateModel(userCred, ElasticcacheManager, &input.ElasticcacheId)
+		_, err = validators.ValidateModel(ctx, userCred, ElasticcacheManager, &input.ElasticcacheId)
 		if err != nil {
 			return nil, err
 		}
@@ -292,7 +303,7 @@ func (self *SSecurityGroup) GetGuestsQuery() *sqlchemy.SQuery {
 			sqlchemy.Equals(guests.Field("admin_secgrp_id"), self.Id),
 			sqlchemy.In(guests.Field("id"), GuestsecgroupManager.Query("guest_id").Equals("secgroup_id", self.Id).SubQuery()),
 		),
-	).Filter(sqlchemy.NotIn(guests.Field("hypervisor"), []string{api.HYPERVISOR_CONTAINER, api.HYPERVISOR_BAREMETAL, api.HYPERVISOR_ESXI}))
+	).Filter(sqlchemy.NotIn(guests.Field("hypervisor"), []string{api.HYPERVISOR_POD, api.HYPERVISOR_BAREMETAL, api.HYPERVISOR_ESXI}))
 }
 
 func (self *SSecurityGroup) GetGuestsCount() (int, error) {
@@ -380,7 +391,7 @@ func (manager *SSecurityGroupManager) FetchCustomizeColumns(
 		return rows
 	}
 
-	q = GuestManager.FilterByOwner(q, GuestManager, userCred, ownerId, queryScope)
+	q = GuestManager.FilterByOwner(ctx, q, GuestManager, userCred, ownerId, queryScope)
 	err = db.FetchModelObjects(GuestManager, q, &guests)
 	if err != nil {
 		log.Errorf("db.FetchModelObjects error: %v", err)
@@ -411,7 +422,7 @@ func (manager *SSecurityGroupManager) FetchCustomizeColumns(
 	}
 
 	sq := GuestManager.Query("id").IsFalse("pending_deleted")
-	sq = GuestManager.FilterByOwner(sq, GuestManager, userCred, ownerId, queryScope)
+	sq = GuestManager.FilterByOwner(ctx, sq, GuestManager, userCred, ownerId, queryScope)
 
 	guestSecgroups := []SGuestsecgroup{}
 	q = GuestsecgroupManager.Query().In("secgroup_id", secgroupIds).In("guest_id", sq.SubQuery())
@@ -446,6 +457,9 @@ func (manager *SSecurityGroupManager) FetchCustomizeColumns(
 		rows[i].SystemGuestCnt, _ = systemGuestMaps[secgroupIds[i]]
 		if cnt, ok := totalCnt[secgroupIds[i]]; ok {
 			rows[i].TotalCnt = cnt.TotalCnt
+			rows[i].LoadbalancerCnt = cnt.LoadbalancerCnt
+			rows[i].RedisCnt = cnt.RedisCnt
+			rows[i].RdsCnt = cnt.RdsCnt
 		}
 	}
 	return rows
@@ -462,7 +476,7 @@ func (manager *SSecurityGroupManager) ValidateCreateData(
 		input.VpcId = api.DEFAULT_VPC_ID
 	}
 
-	vpcObj, err := validators.ValidateModel(userCred, VpcManager, &input.VpcId)
+	vpcObj, err := validators.ValidateModel(ctx, userCred, VpcManager, &input.VpcId)
 	if err != nil {
 		return nil, err
 	}
@@ -518,7 +532,7 @@ func (self *SSecurityGroup) PostCreate(ctx context.Context, userCred mcclient.To
 func (self *SSecurityGroup) StartSecurityGroupCreateTask(ctx context.Context, userCred mcclient.TokenCredential, rules []api.SSecgroupRuleCreateInput, parentTaskId string) error {
 	params := jsonutils.NewDict()
 	params.Set("rules", jsonutils.Marshal(rules))
-	self.SetStatus(userCred, apis.STATUS_CREATING, "")
+	self.SetStatus(ctx, userCred, apis.STATUS_CREATING, "")
 	task, err := taskman.TaskManager.NewTask(ctx, "SecurityGroupCreateTask", self, userCred, params, parentTaskId, "", nil)
 	if err != nil {
 		return errors.Wrapf(err, "NewTask")
@@ -572,12 +586,15 @@ func totalSecurityGroupCount(scope rbacscope.TRbacScope, ownerId mcclient.IIdent
 }
 
 func (self *SSecurityGroup) PerformSyncstatus(ctx context.Context, userCred mcclient.TokenCredential, query jsonutils.JSONObject, input *api.SecurityGroupSyncstatusInput) (jsonutils.JSONObject, error) {
+	if !self.IsManaged() {
+		return nil, self.SetStatus(ctx, userCred, api.SECGROUP_STATUS_READY, "")
+	}
 	return nil, self.StartSecurityGroupSyncTask(ctx, userCred, "")
 }
 
 func (self *SSecurityGroup) StartSecurityGroupSyncTask(ctx context.Context, userCred mcclient.TokenCredential, parentTaskId string) error {
 	params := jsonutils.NewDict()
-	self.SetStatus(userCred, apis.STATUS_SYNC_STATUS, "")
+	self.SetStatus(ctx, userCred, apis.STATUS_SYNC_STATUS, "")
 	task, err := taskman.TaskManager.NewTask(ctx, "SecurityGroupSyncTask", self, userCred, params, parentTaskId, "", nil)
 	if err != nil {
 		return errors.Wrapf(err, "NewTask")
@@ -713,7 +730,7 @@ func (self *SSecurityGroup) PerformClone(ctx context.Context, userCred mcclient.
 	return input, nil
 }
 
-func (self *SSecurityGroup) GetAllowList() (secrules.SecurityRuleSet, secrules.SecurityRuleSet, error) {
+/*func (self *SSecurityGroup) GetAllowList() (secrules.SecurityRuleSet, secrules.SecurityRuleSet, error) {
 	in := secrules.SecurityRuleSet{}
 	out := secrules.SecurityRuleSet{}
 	rules, err := self.GetSecurityRules()
@@ -731,7 +748,7 @@ func (self *SSecurityGroup) GetAllowList() (secrules.SecurityRuleSet, secrules.S
 	in = append(in, *secrules.MustParseSecurityRule("in:deny any"))
 	out = append(out, *secrules.MustParseSecurityRule("out:allow any"))
 	return in.AllowList(), out.AllowList(), nil
-}
+}*/
 
 func (self *SSecurityGroup) clearRules() error {
 	_, err := sqlchemy.GetDB().Exec(
@@ -817,7 +834,8 @@ func (manager *SSecurityGroupManager) InitializeData() error {
 		defRule.Direction = secrules.DIR_IN
 		defRule.Protocol = secrules.PROTO_ANY
 		defRule.Priority = 1
-		defRule.CIDR = "0.0.0.0/0"
+		// empty CIDR means ::/0 or 0.0.0.0/0
+		defRule.CIDR = "" // "0.0.0.0/0"
 		defRule.Action = string(secrules.SecurityRuleAllow)
 		defRule.SecgroupId = api.SECGROUP_DEFAULT_ID
 		err = SecurityGroupRuleManager.TableSpec().Insert(context.TODO(), &defRule)
@@ -826,7 +844,7 @@ func (manager *SSecurityGroupManager) InitializeData() error {
 		}
 	}
 	guests := make([]SGuest, 0)
-	q := GuestManager.Query().Equals("hypervisor", api.HYPERVISOR_KVM).IsNullOrEmpty("secgrp_id")
+	q := GuestManager.Query().Equals("hypervisor", api.HYPERVISOR_KVM).IsNotEmpty("external_id").IsNullOrEmpty("secgrp_id")
 	err = db.FetchModelObjects(GuestManager, q, &guests)
 	if err != nil {
 		log.Errorf("fetch guests without secgroup fail %s", err)
@@ -838,36 +856,36 @@ func (manager *SSecurityGroupManager) InitializeData() error {
 			return nil
 		})
 	}
-	if options.Options.CleanUselessKvmSecurityGroup {
-		q := SecurityGroupManager.Query()
-		q = q.Filter(
-			sqlchemy.AND(
-				sqlchemy.Equals(q.Field("cloudregion_id"), api.DEFAULT_REGION_ID),
-				sqlchemy.NotEquals(q.Field("id"), api.SECGROUP_DEFAULT_ID),
-				sqlchemy.NotIn(q.Field("id"), GuestManager.Query("secgrp_id").IsNotNull("secgrp_id").SubQuery()),
-				sqlchemy.NotIn(q.Field("id"), GuestManager.Query("admin_secgrp_id").IsNotNull("admin_secgrp_id").SubQuery()),
-				sqlchemy.NotIn(q.Field("id"), GuestsecgroupManager.Query("secgroup_id").IsNotNull("secgroup_id").SubQuery()),
-				sqlchemy.NotIn(q.Field("id"), GuestsecgroupManager.Query("secgroup_id").IsNotNull("secgroup_id").SubQuery()),
-				sqlchemy.NotIn(q.Field("id"), DBInstanceSecgroupManager.Query("secgroup_id").IsNotNull("secgroup_id").SubQuery()),
-				sqlchemy.NotIn(q.Field("id"), ElasticcachesecgroupManager.Query("secgroup_id").IsNotNull("secgroup_id").SubQuery()),
-			),
-		)
-		secgroups := []SSecurityGroup{}
-		err := db.FetchModelObjects(SecurityGroupManager, q, &secgroups)
+	return nil
+}
+
+func (manager *SSecurityGroupManager) PerformClean(ctx context.Context, userCred mcclient.TokenCredential, query jsonutils.JSONObject, data jsonutils.JSONObject) (jsonutils.JSONObject, error) {
+	q := SecurityGroupManager.Query()
+	q = q.Filter(
+		sqlchemy.AND(
+			sqlchemy.Equals(q.Field("cloudregion_id"), api.DEFAULT_REGION_ID),
+			sqlchemy.NotEquals(q.Field("id"), api.SECGROUP_DEFAULT_ID),
+			sqlchemy.NotIn(q.Field("id"), GuestManager.Query("secgrp_id").IsNotNull("secgrp_id").SubQuery()),
+			sqlchemy.NotIn(q.Field("id"), GuestManager.Query("admin_secgrp_id").IsNotNull("admin_secgrp_id").SubQuery()),
+			sqlchemy.NotIn(q.Field("id"), GuestsecgroupManager.Query("secgroup_id").IsNotNull("secgroup_id").SubQuery()),
+			sqlchemy.NotIn(q.Field("id"), GuestsecgroupManager.Query("secgroup_id").IsNotNull("secgroup_id").SubQuery()),
+			sqlchemy.NotIn(q.Field("id"), DBInstanceSecgroupManager.Query("secgroup_id").IsNotNull("secgroup_id").SubQuery()),
+			sqlchemy.NotIn(q.Field("id"), ElasticcachesecgroupManager.Query("secgroup_id").IsNotNull("secgroup_id").SubQuery()),
+			sqlchemy.NotIn(q.Field("id"), LoadbalancerSecurityGroupManager.Query("secgroup_id").IsNotNull("secgroup_id").SubQuery()),
+		),
+	)
+	secgroups := []SSecurityGroup{}
+	err := db.FetchModelObjects(SecurityGroupManager, q, &secgroups)
+	if err != nil {
+		return nil, errors.Wrapf(err, "FetchModelObjects")
+	}
+	for i := range secgroups {
+		err = secgroups[i].RealDelete(ctx, userCred)
 		if err != nil {
-			return err
-		}
-		ctx := context.Background()
-		ctx = context.WithValue(ctx, "clean", "kvm security groups")
-		userCred := auth.GetAdminSession(ctx, options.Options.Region).GetToken()
-		for i := range secgroups {
-			err = secgroups[i].RealDelete(ctx, userCred)
-			if err != nil {
-				return err
-			}
+			return nil, errors.Wrapf(err, "delete %s", secgroups[i].Name)
 		}
 	}
-	return nil
+	return nil, nil
 }
 
 func (self *SSecurityGroup) GetRegionDriver() (IRegionDriver, error) {
@@ -979,6 +997,7 @@ func (sm *SSecurityGroupManager) TotalCnt(secIds []string) (map[string]api.SSecu
 
 	rdsSQ := sm.query(DBInstanceSecgroupManager, "secgroup_id", "rds", secIds)
 	redisSQ := sm.query(ElasticcachesecgroupManager, "secgroup_id", "redis", secIds)
+	lbSQ := sm.query(LoadbalancerSecurityGroupManager, "secgroup_id", "loadbalancer", secIds)
 
 	secs := sm.Query().SubQuery()
 	secQ := secs.Query(
@@ -987,6 +1006,7 @@ func (sm *SSecurityGroupManager) TotalCnt(secIds []string) (map[string]api.SSecu
 		sqlchemy.SUM("admin_guest_cnt", g3SQ.Field("guest3")),
 		sqlchemy.SUM("rds_cnt", rdsSQ.Field("rds")),
 		sqlchemy.SUM("redis_cnt", redisSQ.Field("redis")),
+		sqlchemy.SUM("loadbalancer_cnt", lbSQ.Field("loadbalancer")),
 	)
 
 	secQ.AppendField(secQ.Field("id"))
@@ -996,6 +1016,7 @@ func (sm *SSecurityGroupManager) TotalCnt(secIds []string) (map[string]api.SSecu
 	secQ = secQ.LeftJoin(g3SQ, sqlchemy.Equals(secQ.Field("id"), g3SQ.Field("admin_secgrp_id")))
 	secQ = secQ.LeftJoin(rdsSQ, sqlchemy.Equals(secQ.Field("id"), rdsSQ.Field("secgroup_id")))
 	secQ = secQ.LeftJoin(redisSQ, sqlchemy.Equals(secQ.Field("id"), redisSQ.Field("secgroup_id")))
+	secQ = secQ.LeftJoin(lbSQ, sqlchemy.Equals(secQ.Field("id"), lbSQ.Field("secgroup_id")))
 
 	secQ = secQ.Filter(sqlchemy.In(secQ.Field("id"), secIds)).GroupBy(secQ.Field("id"))
 
@@ -1013,26 +1034,15 @@ func (sm *SSecurityGroupManager) TotalCnt(secIds []string) (map[string]api.SSecu
 	return result, nil
 }
 
-func (self *SSecurityGroup) ValidateDeleteCondition(ctx context.Context, info jsonutils.JSONObject) error {
+func (self *SSecurityGroup) ValidateDeleteCondition(ctx context.Context, info api.SecgroupDetails) error {
 	if self.Id == options.Options.DefaultSecurityGroupId {
 		return httperrors.NewProtectedResourceError("not allow to delete default security group")
 	}
 	if self.Id == options.Options.DefaultAdminSecurityGroupId {
 		return httperrors.NewProtectedResourceError("not allow to delete default admin security group")
 	}
-	if !gotypes.IsNil(info) {
-		cnt, _ := info.Int("total_cnt")
-		if cnt > 0 {
-			return httperrors.NewNotEmptyError("the security group %s is in use cnt: %d", self.Id, cnt)
-		}
-	} else {
-		cnts, err := SecurityGroupManager.TotalCnt([]string{self.Id})
-		if err != nil {
-			return errors.Wrapf(err, "SecurityGroupManager.TotalCnt")
-		}
-		if cnt, ok := cnts[self.Id]; ok && cnt.TotalCnt > 0 {
-			return httperrors.NewNotEmptyError("the security group %s is in use cnt: %s", self.Id, jsonutils.Marshal(cnt).String())
-		}
+	if info.TotalCnt > 0 {
+		return httperrors.NewNotEmptyError("the security group %s is in use cnt: %d", self.Id, info.TotalCnt)
 	}
 	return self.SSharableVirtualResourceBase.ValidateDeleteCondition(ctx, nil)
 }
@@ -1043,7 +1053,7 @@ func (self *SSecurityGroup) CustomizeDelete(ctx context.Context, userCred mcclie
 
 func (self *SSecurityGroup) StartDeleteSecurityGroupTask(ctx context.Context, userCred mcclient.TokenCredential, parentTaskId string) error {
 	params := jsonutils.NewDict()
-	self.SetStatus(userCred, apis.STATUS_DELETING, "")
+	self.SetStatus(ctx, userCred, apis.STATUS_DELETING, "")
 	task, err := taskman.TaskManager.NewTask(ctx, "SecurityGroupDeleteTask", self, userCred, params, parentTaskId, "", nil)
 	if err != nil {
 		return errors.Wrapf(err, "NewTask")
@@ -1076,7 +1086,7 @@ func (self *SSecurityGroup) StartRemoteUpdateTask(ctx context.Context, userCred 
 	if err != nil {
 		return errors.Wrap(err, "RemoteUpdateTask")
 	}
-	self.SetStatus(userCred, apis.STATUS_UPDATE_TAGS, "StartRemoteUpdateTask")
+	self.SetStatus(ctx, userCred, apis.STATUS_UPDATE_TAGS, "StartRemoteUpdateTask")
 	return task.ScheduleRun(nil)
 }
 
@@ -1182,8 +1192,8 @@ func (manager *SSecurityGroupManager) ListItemExportKeys(ctx context.Context,
 	return q, nil
 }
 
-func (self *SCloudregion) GetSecgroups(vpcId string) ([]SSecurityGroup, error) {
-	q := SecurityGroupManager.Query().Equals("cloudregion_id", self.Id)
+func (self *SCloudregion) GetSecgroups(managerId, vpcId string) ([]SSecurityGroup, error) {
+	q := SecurityGroupManager.Query().Equals("cloudregion_id", self.Id).Equals("manager_id", managerId)
 	if len(vpcId) > 0 {
 		q = q.Equals("vpc_id", vpcId)
 	}
@@ -1203,7 +1213,7 @@ func (self *SCloudregion) SyncSecgroups(ctx context.Context, userCred mcclient.T
 
 	result := compare.SyncResult{}
 
-	dbSecs, err := self.GetSecgroups(vpcId)
+	dbSecs, err := self.GetSecgroups(provider.Id, vpcId)
 	if err != nil {
 		result.Error(err)
 		return result
@@ -1276,7 +1286,9 @@ func (self *SSecurityGroup) SyncWithCloudSecurityGroup(
 		syncVirtualResourceMetadata(ctx, userCred, self, ext, account.ReadOnly)
 	}
 
-	SyncCloudProject(ctx, userCred, self, syncOwnerId, ext, self.ManagerId)
+	if provider, _ := self.GetCloudprovider(); provider != nil {
+		SyncCloudProject(ctx, userCred, self, syncOwnerId, ext, provider)
+	}
 
 	if !syncRule {
 		return nil
@@ -1342,7 +1354,7 @@ func (self *SCloudregion) newFromCloudSecurityGroup(
 	}
 
 	syncVirtualResourceMetadata(ctx, userCred, ret, ext, false)
-	SyncCloudProject(ctx, userCred, ret, syncOwnerId, ext, ret.ManagerId)
+	SyncCloudProject(ctx, userCred, ret, syncOwnerId, ext, provider)
 
 	rules, err := ext.GetRules()
 	if err != nil {

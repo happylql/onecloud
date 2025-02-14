@@ -34,9 +34,8 @@ type LvNames struct {
 }
 
 func GetLvNames(vg string) ([]string, error) {
-	lvs, err := procutils.NewRemoteCommandAsFarAsPossible(
-		"lvm", "lvs", "--reportformat", "json", "-o", "lv_name", vg,
-	).Output()
+	cmd := fmt.Sprintf("lvm lvs --reportformat json -o lv_name %s 2>/dev/null", vg)
+	lvs, err := procutils.NewRemoteCommandAsFarAsPossible("bash", "-c", cmd).Output()
 	if err != nil {
 		return nil, errors.Wrap(err, "lvm lvs")
 	}
@@ -48,7 +47,7 @@ func GetLvNames(vg string) ([]string, error) {
 	if len(res.Report) != 1 {
 		return nil, errors.Errorf("unexpect res %v", res)
 	}
-	lvNames := make([]string, len(res.Report[0].LV))
+	lvNames := make([]string, 0, len(res.Report[0].LV))
 	for i := 0; i < len(res.Report[0].LV); i++ {
 		lvNames = append(lvNames, res.Report[0].LV[i].LVName)
 	}
@@ -64,9 +63,8 @@ type LvOrigin struct {
 }
 
 func GetLvOrigin(lvPath string) (string, error) {
-	lvs, err := procutils.NewRemoteCommandAsFarAsPossible(
-		"lvm", "lvs", "--reportformat", "json", "-o", "origin", lvPath,
-	).Output()
+	cmd := fmt.Sprintf("lvm lvs --reportformat json -o origin %s 2>/dev/null", lvPath)
+	lvs, err := procutils.NewRemoteCommandAsFarAsPossible("bash", "-c", cmd).Output()
 	if err != nil {
 		return "", errors.Wrap(err, "lvm lvs")
 	}
@@ -80,6 +78,67 @@ func GetLvOrigin(lvPath string) (string, error) {
 
 	}
 	return "", errors.Errorf("unexpect res %v", res)
+}
+
+type LvActive struct {
+	Report []struct {
+		LV []struct {
+			LvActive string `json:"lv_active"`
+		} `json:"lv"`
+	} `json:"report"`
+}
+
+func LvIsActivated(lvPath string) (bool, error) {
+	cmd := fmt.Sprintf("lvm lvs --reportformat json -o lv_active %s 2>/dev/null", lvPath)
+	lvs, err := procutils.NewRemoteCommandAsFarAsPossible("bash", "-c", cmd).Output()
+	if err != nil {
+		return false, errors.Wrap(err, "lvm lvs")
+	}
+	var res LvActive
+	err = json.Unmarshal(lvs, &res)
+	if err != nil {
+		return false, errors.Wrap(err, "unmarshal lvs")
+	}
+	if len(res.Report) == 1 && len(res.Report[0].LV) == 1 {
+		return res.Report[0].LV[0].LvActive == "active", nil
+
+	}
+	return false, errors.Errorf("unexpect res %v", res)
+}
+
+func LVActive(lvPath string, share, exclusive bool) error {
+	opts := "-ay"
+	if share {
+		opts += "s"
+	} else if exclusive {
+		opts += "e"
+	}
+
+	cmd := fmt.Sprintf("lvm lvchange %s %s", opts, lvPath)
+	out, err := procutils.NewRemoteCommandAsFarAsPossible("bash", "-c", cmd).Output()
+	if err != nil {
+		return errors.Wrapf(err, "lvchange %s %s failed %s", opts, lvPath, out)
+	}
+	return nil
+}
+
+func LVDeactivate(lvPath string) error {
+	opts := "-an"
+	cmd := fmt.Sprintf("lvm lvchange %s %s", opts, lvPath)
+	out, err := procutils.NewRemoteCommandAsFarAsPossible("bash", "-c", cmd).Output()
+	if err != nil {
+		return errors.Wrapf(err, "lvchange %s %s failed %s", opts, lvPath, out)
+	}
+	return nil
+}
+
+func LvScan() error {
+	cmd := "lvm lvscan"
+	out, err := procutils.NewRemoteCommandAsFarAsPossible("bash", "-c", cmd).Output()
+	if err != nil {
+		return errors.Wrapf(err, "lvscan failed %s", out)
+	}
+	return nil
 }
 
 type VgProps struct {
@@ -98,12 +157,12 @@ type VgReports struct {
 	} `json:"report"`
 }
 
+// lvm units https://access.redhat.com/documentation/en-us/red_hat_enterprise_linux/6/html/logical_volume_manager_administration/report_units
 func GetVgProps(vg string) (*VgProps, error) {
-	out, err := procutils.NewRemoteCommandAsFarAsPossible(
-		"lvm", "vgs", "--reportformat", "json", "-o", "vg_free,vg_size,vg_extent_size", "--units=B", vg,
-	).Output()
+	cmd := fmt.Sprintf("lvm vgs --reportformat json -o vg_free,vg_size,vg_extent_size --units=B %s 2>/dev/null", vg)
+	out, err := procutils.NewRemoteCommandAsFarAsPossible("bash", "-c", cmd).Output()
 	if err != nil {
-		return nil, errors.Wrapf(err, "exec lvm command: %s", out)
+		return nil, errors.Wrapf(err, "exec lvm command %s: %s", cmd, out)
 	}
 	var vgReports VgReports
 	err = json.Unmarshal(out, &vgReports)
@@ -211,4 +270,53 @@ $size1 $size2 linear $2 0" | dmsetup create $3
 		return errors.Wrapf(err, "create device mapper failed %s", out)
 	}
 	return nil
+}
+
+func VgDisplay(vgName string) error {
+	out, err := procutils.NewRemoteCommandAsFarAsPossible("lvm", "vgdisplay", vgName).Output()
+	if err != nil {
+		return errors.Wrapf(err, "vgdisplay %s failed %s", vgName, out)
+	}
+	return nil
+}
+
+func VgActive(vgName string, active bool) error {
+	opts := "-ay"
+	if !active {
+		opts = "-an"
+	}
+	out, err := procutils.NewRemoteCommandAsFarAsPossible("lvm", "vgchange", opts, vgName).Output()
+	if err != nil {
+		return errors.Wrapf(err, "vgchange %s %s failed %s", opts, vgName, out)
+	}
+	return nil
+}
+
+func LvRename(vgName, oldName, newName string) error {
+	out, err := procutils.NewRemoteCommandAsFarAsPossible("lvm", "lvrename", vgName, oldName, newName).Output()
+	if err != nil {
+		return errors.Wrapf(err, "lvrename vg: %s oldName: %s newName: %s failed: %s", vgName, oldName, newName, out)
+	}
+	return nil
+}
+
+func GetQcow2LvSize(sizeMb int64) int64 {
+	// 100G reserve 1M for qcow2 metadata
+	metaSize := sizeMb/1024/100 + 10
+	return sizeMb + metaSize
+}
+
+// get lvsize unit byte
+func GetLvSize(lvPath string) (int64, error) {
+	cmd := fmt.Sprintf("lvm lvs %s -o LV_SIZE --noheadings --units B --nosuffix 2>/dev/null", lvPath)
+	out, err := procutils.NewRemoteCommandAsFarAsPossible("bash", "-c", cmd).Output()
+	if err != nil {
+		return -1, errors.Wrapf(err, "exec lvm command %s: %s", cmd, out)
+	}
+	strSize := strings.TrimSpace(string(out))
+	size, err := strconv.ParseInt(strSize, 10, 64)
+	if err != nil {
+		return -1, errors.Wrapf(err, "failed parse size %s", strSize)
+	}
+	return size, nil
 }

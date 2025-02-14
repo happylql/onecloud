@@ -42,6 +42,10 @@ func (f *SEcloudProviderFactory) IsSupportPrepaidResources() bool {
 	return true
 }
 
+func (f *SEcloudProviderFactory) IsReadOnly() bool {
+	return true
+}
+
 func (f *SEcloudProviderFactory) ValidateCreateCloudaccountData(ctx context.Context, input cloudprovider.SCloudaccountCredential) (cloudprovider.SCloudaccount, error) {
 	output := cloudprovider.SCloudaccount{}
 	if len(input.AccessKeyId) == 0 {
@@ -122,12 +126,12 @@ func (p *SEcloudProvider) GetAccountId() string {
 	return p.client.GetAccountId()
 }
 
-func (p *SEcloudProvider) GetIRegions() []cloudprovider.ICloudRegion {
+func (p *SEcloudProvider) GetIRegions() ([]cloudprovider.ICloudRegion, error) {
 	return p.client.GetIRegions()
 }
 
 func (p *SEcloudProvider) GetSysInfo() (jsonutils.JSONObject, error) {
-	iregions := p.client.GetIRegions()
+	iregions, _ := p.client.GetIRegions()
 	info := jsonutils.NewDict()
 	info.Add(jsonutils.NewInt(int64(len(iregions))), "region_count")
 	info.Add(jsonutils.NewString(ecloud.CLOUD_API_VERSION), "api_version")

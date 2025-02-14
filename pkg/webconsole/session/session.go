@@ -15,6 +15,7 @@
 package session
 
 import (
+	"context"
 	"fmt"
 	"math/rand"
 	"net/url"
@@ -91,8 +92,10 @@ func (man *SSessionManager) Get(accessToken string) (*SSession, bool) {
 	s := obj.(*SSession)
 	protocol := s.GetProtocol()
 	if protocol != SPICE && time.Since(s.AccessedAt) < AccessInterval {
-		log.Warningf("Protol: %q, Token: %s, Session: %s can't be accessed during %s, last accessed at: %s", s.GetProtocol(), accessToken, s.Id, AccessInterval, s.AccessedAt)
-		return nil, false
+		if !(protocol == WS && o.Options.KeepWebsocketSession) {
+			log.Warningf("Protol: %q, Token: %s, Session: %s can't be accessed during %s, last accessed at: %s", s.GetProtocol(), accessToken, s.Id, AccessInterval, s.AccessedAt)
+			return nil, false
+		}
 	}
 	s.AccessedAt = time.Now()
 	return s, true
@@ -102,6 +105,14 @@ type ISessionData interface {
 	command.ICommand
 	IsNeedLogin() (bool, error)
 	GetId() string
+	GetDisplayInfo(ctx context.Context) (*SDisplayInfo, error)
+}
+
+type ISessionCommand interface {
+	command.ICommand
+
+	GetInstanceName() string
+	GetIPs() []string
 }
 
 type RandomSessionData struct {
@@ -124,6 +135,28 @@ func (s *RandomSessionData) IsNeedLogin() (bool, error) {
 	return false, nil
 }
 
+func (s *RandomSessionData) GetDisplayInfo(ctx context.Context) (*SDisplayInfo, error) {
+	userInfo, err := fetchUserInfo(ctx, s.GetClientSession())
+	if err != nil {
+		return nil, errors.Wrap(err, "fetchUserInfo")
+	}
+	dispInfo := SDisplayInfo{}
+	dispInfo.WaterMark = fetchWaterMark(userInfo)
+	dispInfo.InstanceName = s.GetCommand().String()
+	si, ok := s.ICommand.(ISessionCommand)
+	if ok {
+		iName := si.GetInstanceName()
+		if iName != "" {
+			dispInfo.InstanceName = iName
+		}
+		ips := si.GetIPs()
+		if len(ips) > 0 {
+			dispInfo.Ips = strings.Join(ips, ",")
+		}
+	}
+	return &dispInfo, nil
+}
+
 type SSession struct {
 	ISessionData
 	Id            string
@@ -133,10 +166,12 @@ type SSession struct {
 	recorder      recorder.Recoder
 }
 
-func (s *SSession) GetConnectParams(params url.Values) (string, error) {
+func (s *SSession) GetConnectParams(params url.Values, dispInfo *SDisplayInfo) (string, error) {
 	if params == nil {
-		params = url.Values(make(map[string][]string))
+		params = url.Values{}
 	}
+
+	params = dispInfo.populateParams(params)
 
 	apiUrl, err := url.Parse(o.Options.ApiServer)
 	if err != nil {

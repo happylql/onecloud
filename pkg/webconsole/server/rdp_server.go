@@ -15,7 +15,6 @@
 package server
 
 import (
-	"io"
 	"net/http"
 	"time"
 
@@ -23,7 +22,6 @@ import (
 
 	"yunion.io/x/log"
 	"yunion.io/x/pkg/errors"
-	"yunion.io/x/pkg/gotypes"
 
 	"yunion.io/x/onecloud/pkg/webconsole/guac"
 	"yunion.io/x/onecloud/pkg/webconsole/options"
@@ -80,7 +78,17 @@ func (s *RDPServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	defer ws.Close()
 
-	tunnel, err := guac.NewGuacamoleTunnel(s.Host, s.Port, s.Username, s.Password, s.ConnectionId, s.Width, s.Height, s.Dpi)
+	tunnel, err := guac.NewGuacamoleTunnel(
+		s.Host,
+		s.Port,
+		s.Username,
+		s.Password,
+		s.ConnectionId,
+		s.Width,
+		s.Height,
+		s.Dpi,
+		s.Session.GetClientSession().GetUserId(),
+	)
 	if err != nil {
 		log.Errorf("NewGuacamoleTunnel error: %v", err)
 		return
@@ -104,18 +112,15 @@ func (s *RDPServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		for {
 			ins, err := tunnel.ReadOne()
 			if err != nil {
-				log.Errorf("read one error: %v", err)
 				return
 			}
 			if options.Options.RdpSessionTimeoutMinutes > 0 && timer != nil {
 				timer.Reset(time.Duration(options.Options.RdpSessionTimeoutMinutes) * time.Minute)
 			}
-			if !gotypes.IsNil(ins) {
-				err = ws.WriteMessage(websocket.TextMessage, []byte(ins.String()))
-				if err != nil {
-					log.Errorf("Failed writing to guacd %s: %v", ins.String(), err)
-					return
-				}
+			err = ws.WriteMessage(websocket.TextMessage, []byte(ins.String()))
+			if err != nil {
+				log.Errorf("Failed writing to guacd %s: %v", ins.String(), err)
+				return
 			}
 		}
 	}()
@@ -127,11 +132,11 @@ func (s *RDPServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		for {
 			_, p, err := ws.ReadMessage()
 			if err != nil {
-				if errors.Cause(err) != io.EOF {
-					log.Errorf("read message error %v", err)
+				if websocket.IsCloseError(err, websocket.CloseNormalClosure) {
 					return
 				}
-				continue
+				log.Errorf("read message error %v", err)
+				return
 			}
 			if options.Options.RdpSessionTimeoutMinutes > 0 && timer != nil {
 				timer.Reset(time.Duration(options.Options.RdpSessionTimeoutMinutes) * time.Minute)
@@ -169,7 +174,7 @@ func (s *RDPServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		defer setDone()
 
 		err = tunnel.Wait()
-		if err != nil {
+		if err != nil && errors.Cause(err) != guac.TunnerClose {
 			log.Errorf("wait error: %v", err)
 		}
 	}()

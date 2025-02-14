@@ -76,6 +76,7 @@ func (self *SAliyunGuestDriver) GetStorageTypes() []string {
 		api.STORAGE_CLOUD_ESSD,
 		api.STORAGE_CLOUD_ESSD_PL2,
 		api.STORAGE_CLOUD_ESSD_PL3,
+		api.STORAGE_CLOUD_ESSD_ENTRY,
 		api.STORAGE_CLOUD_AUTO,
 		api.STORAGE_PUBLIC_CLOUD,
 		api.STORAGE_EPHEMERAL_SSD,
@@ -114,12 +115,6 @@ func (self *SAliyunGuestDriver) ValidateResizeDisk(guest *models.SGuest, disk *m
 	if !utils.IsInStringArray(guest.Status, []string{api.VM_READY, api.VM_RUNNING}) {
 		return fmt.Errorf("Cannot resize disk when guest in status %s", guest.Status)
 	}
-	if disk.DiskType == api.DISK_TYPE_SYS {
-		return fmt.Errorf("Cannot resize system disk")
-	}
-	if !utils.IsInStringArray(storage.StorageType, []string{api.STORAGE_PUBLIC_CLOUD, api.STORAGE_CLOUD_SSD, api.STORAGE_CLOUD_EFFICIENCY}) {
-		return fmt.Errorf("Cannot resize %s disk", storage.StorageType)
-	}
 	return nil
 }
 
@@ -152,6 +147,9 @@ func (self *SAliyunGuestDriver) ValidateCreateData(ctx context.Context, userCred
 			maxGB = 800
 		case api.STORAGE_CLOUD_AUTO, api.STORAGE_CLOUD_ESSD_PL0:
 			minGB = 40
+			maxGB = 32768
+		case api.STORAGE_CLOUD_ESSD_ENTRY:
+			minGB = 10
 			maxGB = 32768
 		}
 		if i == 0 && (disk.SizeMb < 20*1024 || disk.SizeMb > 500*1024) {
@@ -197,6 +195,7 @@ func (self *SAliyunGuestDriver) GetInstanceCapability() cloudprovider.SInstanceC
 				{StorageType: api.STORAGE_CLOUD_ESSD, MaxSizeGb: 32768, MinSizeGb: 20, StepSizeGb: 1, Resizable: true},
 				{StorageType: api.STORAGE_CLOUD_ESSD_PL2, MaxSizeGb: 32768, MinSizeGb: 461, StepSizeGb: 1, Resizable: true},
 				{StorageType: api.STORAGE_CLOUD_ESSD_PL3, MaxSizeGb: 32768, MinSizeGb: 1261, StepSizeGb: 1, Resizable: true},
+				{StorageType: api.STORAGE_CLOUD_ESSD_ENTRY, MaxSizeGb: 32768, MinSizeGb: 10, StepSizeGb: 1, Resizable: true},
 				{StorageType: api.STORAGE_CLOUD_AUTO, MaxSizeGb: 32768, MinSizeGb: 40, StepSizeGb: 1, Resizable: true},
 				{StorageType: api.STORAGE_PUBLIC_CLOUD, MaxSizeGb: 2000, MinSizeGb: 5, StepSizeGb: 1, Resizable: true},
 				{StorageType: api.STORAGE_EPHEMERAL_SSD, MaxSizeGb: 800, MinSizeGb: 5, StepSizeGb: 1, Resizable: true},
@@ -208,6 +207,7 @@ func (self *SAliyunGuestDriver) GetInstanceCapability() cloudprovider.SInstanceC
 				{StorageType: api.STORAGE_CLOUD_ESSD, MaxSizeGb: 500, MinSizeGb: 20, StepSizeGb: 1, Resizable: true},
 				{StorageType: api.STORAGE_CLOUD_ESSD_PL2, MaxSizeGb: 32768, MinSizeGb: 461, StepSizeGb: 1, Resizable: true},
 				{StorageType: api.STORAGE_CLOUD_ESSD_PL3, MaxSizeGb: 32768, MinSizeGb: 1261, StepSizeGb: 1, Resizable: true},
+				{StorageType: api.STORAGE_CLOUD_ESSD_ENTRY, MaxSizeGb: 32768, MinSizeGb: 10, StepSizeGb: 1, Resizable: true},
 				{StorageType: api.STORAGE_CLOUD_AUTO, MaxSizeGb: 32768, MinSizeGb: 40, StepSizeGb: 1, Resizable: true},
 			},
 		},

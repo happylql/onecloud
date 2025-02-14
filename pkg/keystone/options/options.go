@@ -60,9 +60,10 @@ type SKeystoneOptions struct {
 	DomainAdminRoleToNotify string `help:"domain admin role to notify" default:"domainadmin"`
 	AdminRoleToNotify       string `help:"admin role to notify" default:"admin"`
 
-	SystemDashboardPolicy  string `help:"dashboard policy name for system view" default:""`
-	DomainDashboardPolicy  string `help:"dashboard policy name for domain view" default:""`
-	ProjectDashboardPolicy string `help:"dashboard policy name for project view" default:""`
+	EnableDefaultDashboardPolicy bool   `default:"true" help:"enable default dashboard policy"`
+	SystemDashboardPolicy        string `help:"dashboard policy name for system view" default:""`
+	DomainDashboardPolicy        string `help:"dashboard policy name for domain view" default:""`
+	ProjectDashboardPolicy       string `help:"dashboard policy name for project view" default:""`
 
 	NoPolicyViolationCheck bool `help:"do not check policy violation when modify or assign policy" default:"false"`
 
@@ -70,13 +71,16 @@ type SKeystoneOptions struct {
 	SystemThreeAdminRoleNames []string `help:"Name of system three-admin roles" default:"sys_secadmin,sys_opsadmin,sys_adtadmin"`
 	DomainThreeAdminRoleNames []string `help:"Name of system three-admin roles" default:"domain_secadmin,domain_opsadmin,domain_adtadmin"`
 
-	LdapSearchPageSize uint32 `help:"pagination size for LDAP search" default:"100"`
+	LdapSearchPageSize    uint32 `help:"pagination size for LDAP search" default:"100"`
+	LdapSyncDisabledUsers bool   `help:"auto sync ldap disabled users"`
 
 	ProjectAdminRole     string `help:"name of role to be saved as admin user of project" default:"project_owner"`
 	PwdExpiredNotifyDays []int  `help:"The notify for password will expire " default:"1,7"`
 
 	MaxUserRolesInProject  int `help:"maximal allowed roles of a user in a project" default:"20"`
 	MaxGroupRolesInProject int `help:"maximal allowed roles of a group in a project" default:"20"`
+
+	ForceEnableMfa string `help:"force enable mfa" default:"disable" choices:"all|after|disable"`
 }
 
 var (
@@ -97,6 +101,10 @@ func OnOptionsChange(oldOptions, newOptions interface{}) bool {
 	}
 
 	if oldOpts.DefaultUserLanguage != newOpts.DefaultUserLanguage {
+		changed = true
+	}
+
+	if oldOpts.ForceEnableMfa != newOpts.ForceEnableMfa {
 		changed = true
 	}
 

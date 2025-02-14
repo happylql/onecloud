@@ -18,6 +18,7 @@ import (
 	"context"
 
 	"yunion.io/x/jsonutils"
+	"yunion.io/x/pkg/errors"
 
 	api "yunion.io/x/onecloud/pkg/apis/compute"
 	"yunion.io/x/onecloud/pkg/cloudcommon/db"
@@ -57,30 +58,42 @@ func (self *StorageCacheImageTask) OnRelinquishLeastUsedCachedImageComplete(ctx 
 
 	scimg := models.StoragecachedimageManager.Register(ctx, self.UserCred, storageCache.Id, imageId, "")
 	if scimg.Status != api.CACHED_IMAGE_STATUS_ACTIVE {
-		scimg.SetStatus(self.UserCred, api.CACHED_IMAGE_STATUS_CACHING, "storage_cache_image_task")
+		scimg.SetStatus(ctx, self.UserCred, api.CACHED_IMAGE_STATUS_CACHING, "storage_cache_image_task")
 	}
 
 	db.OpsLog.LogEvent(storageCache, db.ACT_CACHING_IMAGE, imageId, self.UserCred)
 
-	self.SetStage("OnImageCacheComplete", nil)
-
-	host, err := storageCache.GetHost()
-	if err != nil {
-		errData := taskman.Error2TaskData(err)
-		self.OnImageCacheCompleteFailed(ctx, storageCache, errData)
-		return
-	}
-
+	var host *models.SHost
+	var err error
 	serverId, _ := self.Params.GetString("server_id")
 	if len(serverId) > 0 {
-		guest, _ := models.GuestManager.FetchById(serverId)
-		if guest != nil {
-			server := guest.(*models.SGuest)
-			server.SetStatus(self.GetUserCred(), api.VM_IMAGE_CACHING, "")
+		guest, err := models.GuestManager.FetchById(serverId)
+		if err != nil {
+			errData := taskman.Error2TaskData(err)
+			self.OnImageCacheCompleteFailed(ctx, storageCache, errData)
+			return
+		}
+		server := guest.(*models.SGuest)
+		self.Params.Set("guest_old_status", jsonutils.NewString(server.Status))
+		server.SetStatus(ctx, self.GetUserCred(), api.VM_IMAGE_CACHING, "")
+		host, _ = server.GetHost()
+	} else {
+		host, err = storageCache.GetMasterHost()
+		if err != nil {
+			errData := taskman.Error2TaskData(err)
+			self.OnImageCacheCompleteFailed(ctx, storageCache, errData)
+			return
 		}
 	}
 
-	err = host.GetHostDriver().CheckAndSetCacheImage(ctx, self.UserCred, host, storageCache, self)
+	self.SetStage("OnImageCacheComplete", nil)
+	driver, err := host.GetHostDriver()
+	if err != nil {
+		self.OnImageCacheCompleteFailed(ctx, storageCache, jsonutils.NewString(errors.Wrapf(err, "GetHostDriver").Error()))
+		return
+	}
+
+	err = driver.CheckAndSetCacheImage(ctx, self.UserCred, host, storageCache, self)
 	if err != nil {
 		errData := taskman.Error2TaskData(err)
 		self.OnImageCacheCompleteFailed(ctx, storageCache, errData)
@@ -102,7 +115,7 @@ func (self *StorageCacheImageTask) OnImageCacheCompleteFailed(ctx context.Contex
 }
 
 func (self *StorageCacheImageTask) OnCacheFailed(ctx context.Context, cache *models.SStoragecache, imageId string, scimg *models.SStoragecachedimage, reason jsonutils.JSONObject, extImgId string) {
-	scimg.SetStatus(self.UserCred, api.CACHED_IMAGE_STATUS_CACHE_FAILED, reason.String())
+	scimg.SetStatus(ctx, self.UserCred, api.CACHED_IMAGE_STATUS_CACHE_FAILED, reason.String())
 	if len(extImgId) > 0 && scimg.ExternalId != extImgId {
 		scimg.SetExternalId(extImgId)
 	}
@@ -122,10 +135,24 @@ func (self *StorageCacheImageTask) OnCacheSucc(ctx context.Context, cache *model
 	scimg := models.StoragecachedimageManager.Register(ctx, self.UserCred, cache.Id, imageId, "")
 	extImgId, _ := data.GetString("image_id")
 
-	scimg.SetStatus(self.UserCred, api.CACHED_IMAGE_STATUS_ACTIVE, "cached")
+	scimg.SetStatus(ctx, self.UserCred, api.CACHED_IMAGE_STATUS_ACTIVE, "cached")
 	if len(extImgId) > 0 && scimg.ExternalId != extImgId {
 		scimg.SetExternalId(extImgId)
 	}
+
+	serverId, _ := self.Params.GetString("server_id")
+	if len(serverId) > 0 {
+		guest, err := models.GuestManager.FetchById(serverId)
+		if err != nil {
+			errData := taskman.Error2TaskData(err)
+			self.OnImageCacheCompleteFailed(ctx, cache, errData)
+			return
+		}
+		server := guest.(*models.SGuest)
+		oldStatus, _ := self.Params.GetString("guest_old_status")
+		server.SetStatus(ctx, self.GetUserCred(), oldStatus, "on cache succ")
+	}
+
 	models.CachedimageManager.ImageAddRefCount(imageId)
 	db.OpsLog.LogEvent(cache, db.ACT_CACHED_IMAGE, imageId, self.UserCred)
 	self.SetStageComplete(ctx, data)

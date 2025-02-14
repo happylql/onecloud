@@ -23,6 +23,7 @@ import (
 	"yunion.io/x/onecloud/pkg/cloudcommon/db"
 	"yunion.io/x/onecloud/pkg/cloudcommon/db/taskman"
 	"yunion.io/x/onecloud/pkg/compute/models"
+	"yunion.io/x/onecloud/pkg/util/logclient"
 )
 
 func init() {
@@ -37,12 +38,17 @@ type GuestSoftResetTask struct {
 
 func (self *GuestSoftResetTask) OnInit(ctx context.Context, obj db.IStandaloneModel, data jsonutils.JSONObject) {
 	guest := obj.(*models.SGuest)
-	err := guest.GetDriver().RequestSoftReset(ctx, guest, self)
-	if err == nil {
-		self.SetStageComplete(ctx, nil)
-	} else {
+	drv, err := guest.GetDriver()
+	if err != nil {
 		self.SetStageFailed(ctx, jsonutils.NewString(err.Error()))
+		return
 	}
+	err = drv.RequestSoftReset(ctx, guest, self)
+	if err != nil {
+		self.SetStageFailed(ctx, jsonutils.NewString(err.Error()))
+		return
+	}
+	self.SetStageComplete(ctx, nil)
 }
 
 type GuestHardResetTask struct {
@@ -55,9 +61,9 @@ func (self *GuestHardResetTask) OnInit(ctx context.Context, obj db.IStandaloneMo
 }
 
 func (self *GuestHardResetTask) StopServer(ctx context.Context, guest *models.SGuest) {
-	guest.SetStatus(self.UserCred, api.VM_STOPPING, "")
+	guest.SetStatus(ctx, self.UserCred, api.VM_STOPPING, "")
 	self.SetStage("OnServerStopComplete", nil)
-	guest.StartGuestStopTask(ctx, self.UserCred, false, false, self.GetTaskId())
+	guest.StartGuestStopTask(ctx, self.UserCred, 30, false, false, self.GetTaskId())
 	// logclient.AddActionLogWith(guest, logclient.ACT_VM_RESTART, `{"is_force": true}`, self.UserCred, true)
 }
 
@@ -71,6 +77,7 @@ func (self *GuestHardResetTask) StartServer(ctx context.Context, guest *models.S
 }
 
 func (self *GuestHardResetTask) OnServerStartComplete(ctx context.Context, guest *models.SGuest, data jsonutils.JSONObject) {
+	logclient.AddActionLogWithStartable(self, guest, logclient.ACT_VM_RESTART, nil, self.GetUserCred(), true)
 	self.SetStageComplete(ctx, nil)
 }
 
@@ -81,6 +88,6 @@ type GuestRestartTask struct {
 func (self *GuestRestartTask) StopServer(ctx context.Context, guest *models.SGuest) {
 	self.SetStage("OnServerStopComplete", nil)
 	isForce := jsonutils.QueryBoolean(self.Params, "is_force", false)
-	guest.StartGuestStopTask(ctx, self.UserCred, isForce, false, self.GetTaskId())
+	guest.StartGuestStopTask(ctx, self.UserCred, 60, isForce, false, self.GetTaskId())
 	// logclient.AddActionLog(guest, logclient.ACT_VM_RESTART, `{"is_force": false}`, self.UserCred, true)
 }

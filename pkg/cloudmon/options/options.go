@@ -34,8 +34,9 @@ type CloudMonOptions struct {
 	HistoryMetricPullDays          int  `help:"pull history metrics" default:"-1"`
 	SupportAzureTableStorageMetric bool `help:"support collect azure memory and disk usage metric, there may be additional charges" default:"false"`
 
-	CloudAccountCollectMetricsBatchCount  int `help:"Cloud Account Collect Metrics Batch Count" default:"10"`
-	CloudResourceCollectMetricsBatchCount int `help:"Cloud Resource Collect Metrics BatchC ount" default:"40"`
+	CloudAccountCollectMetricsBatchCount        int `help:"Cloud Account Collect Metrics Batch Count" default:"10"`
+	CloudResourceCollectMetricsBatchCount       int `help:"Cloud Resource Collect Metrics BatchC ount" default:"40"`
+	OracleCloudResourceCollectMetricsBatchCount int `help:"OracleCloud Resource Collect Metrics BatchC ount" default:"1"`
 }
 
 type PingProbeOptions struct {
@@ -45,6 +46,8 @@ type PingProbeOptions struct {
 
 	DisablePingProbe      bool  `help:"enable ping probe"`
 	PingProbIntervalHours int64 `help:"PingProb Interval unit:hour" default:"6"`
+
+	PingReserveIPTimeoutHours int `help:"expire hours to reserve the probed IP, default 0, never expire" default:"0"`
 }
 
 var (

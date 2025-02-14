@@ -30,14 +30,14 @@ import (
 )
 
 type sUSBDevice struct {
-	*sBaseDevice
+	*SBaseDevice
 	lsusbLine *sLsusbLine
 }
 
 // TODO: rename PCIDevice
 func newUSBDevice(dev *PCIDevice, lsusbLine *sLsusbLine) *sUSBDevice {
 	return &sUSBDevice{
-		sBaseDevice: newBaseDevice(dev, api.USB_TYPE),
+		SBaseDevice: NewBaseDevice(dev, api.USB_TYPE),
 		lsusbLine:   lsusbLine,
 	}
 }
@@ -121,11 +121,13 @@ func (dev *sUSBDevice) GetPassthroughCmd(index int) string {
 	return opt
 }
 
-func (dev *sUSBDevice) GetHotPlugOptions(*desc.SGuestIsolatedDevice) ([]*HotPlugOption, error) {
+func (dev *sUSBDevice) GetHotPlugOptions(isolatedDev *desc.SGuestIsolatedDevice, guestDesc *desc.SGuestDesc) ([]*HotPlugOption, error) {
 	opts, err := GetUSBDevQemuOptions(dev.dev.GetVendorDeviceId(), dev.dev.Addr)
 	if err != nil {
 		return nil, errors.Wrap(err, "GetUSBDevQemuOptions")
 	}
+	opts["id"] = isolatedDev.Usb.Id
+	opts["bus"] = fmt.Sprintf("%s.0", guestDesc.Usb.Id)
 	return []*HotPlugOption{
 		{
 			Device:  "usb-host",

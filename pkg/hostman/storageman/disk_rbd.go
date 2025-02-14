@@ -133,7 +133,8 @@ func (d *SRBDDisk) Resize(ctx context.Context, params interface{}) (jsonutils.JS
 		Path: d.GetPath(),
 	}
 	if err := d.ResizeFs(resizeFsInfo); err != nil {
-		return nil, errors.Wrapf(err, "resize fs %s", d.GetPath())
+		log.Errorf("Resize fs %s fail %s", d.GetPath(), err)
+		// return nil, errors.Wrapf(err, "resize fs %s", d.GetPath())
 	}
 
 	return d.GetDiskDesc(), nil
@@ -209,11 +210,11 @@ func (d *SRBDDisk) createFromTemplate(ctx context.Context, imageId, format strin
 	return d.GetDiskDesc(), nil
 }
 
-func (d *SRBDDisk) CreateFromImageFuse(ctx context.Context, url string, size int64, encryptInfo *apis.SEncryptInfo) error {
+func (d *SRBDDisk) CreateFromRemoteHostImage(ctx context.Context, url string, size int64, encryptInfo *apis.SEncryptInfo) error {
 	return fmt.Errorf("Not support")
 }
 
-func (d *SRBDDisk) CreateRaw(ctx context.Context, sizeMb int, diskFromat string, fsFormat string, encryptInfo *apis.SEncryptInfo, diskId string, back string) (jsonutils.JSONObject, error) {
+func (d *SRBDDisk) CreateRaw(ctx context.Context, sizeMb int, diskFormat string, fsFormat string, fsFeatures *api.DiskFsFeatures, encryptInfo *apis.SEncryptInfo, diskId string, back string) (jsonutils.JSONObject, error) {
 	if encryptInfo != nil {
 		return nil, errors.Wrap(httperrors.ErrNotSupported, "rbd not support encryptInfo")
 	}
@@ -227,14 +228,14 @@ func (d *SRBDDisk) CreateRaw(ctx context.Context, sizeMb int, diskFromat string,
 		Path: d.GetPath(),
 	}
 	if utils.IsInStringArray(fsFormat, []string{"swap", "ext2", "ext3", "ext4", "xfs"}) {
-		d.FormatFs(fsFormat, diskId, diskInfo)
+		d.FormatFs(fsFormat, nil, diskId, diskInfo)
 	}
 
 	return d.GetDiskDesc(), nil
 }
 
-func (d *SRBDDisk) PostCreateFromImageFuse() {
-	log.Errorf("Not support PostCreateFromImageFuse")
+func (d *SRBDDisk) PostCreateFromRemoteHostImage(string) {
+	log.Errorf("Not support PostCreateFromRemoteHostImage")
 }
 
 func (d *SRBDDisk) DiskBackup(ctx context.Context, params interface{}) (jsonutils.JSONObject, error) {
@@ -255,7 +256,11 @@ func (d *SRBDDisk) CreateSnapshot(snapshotId string, encryptKey string, encForma
 	return storage.createSnapshot(d.Id, snapshotId)
 }
 
-func (d *SRBDDisk) DeleteSnapshot(snapshotId, convertSnapshot string, pendingDelete bool) error {
+func (d *SRBDDisk) ConvertSnapshot(convertSnapshotId string, encryptInfo apis.SEncryptInfo) error {
+	return nil
+}
+
+func (d *SRBDDisk) DeleteSnapshot(snapshotId, convertSnapshot string, blockStream bool, encryptInfo apis.SEncryptInfo) error {
 	storage := d.Storage.(*SRbdStorage)
 	return storage.deleteSnapshot(d.Id, snapshotId)
 }
@@ -273,7 +278,7 @@ func (d *SRBDDisk) DiskDeleteSnapshot(ctx context.Context, params interface{}) (
 	if !ok {
 		return nil, hostutils.ParamsError
 	}
-	err := d.DeleteSnapshot(snapshotId, "", false)
+	err := d.DeleteSnapshot(snapshotId, "", false, apis.SEncryptInfo{})
 	if err != nil {
 		return nil, err
 	} else {

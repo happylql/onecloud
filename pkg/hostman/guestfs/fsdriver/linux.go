@@ -30,7 +30,6 @@ import (
 	"yunion.io/x/jsonutils"
 	"yunion.io/x/log"
 	"yunion.io/x/pkg/errors"
-	"yunion.io/x/pkg/util/netutils"
 	"yunion.io/x/pkg/utils"
 
 	"yunion.io/x/onecloud/pkg/apis"
@@ -52,11 +51,16 @@ const (
 	YUNIONROOT_USER       = "cloudroot"
 	TELEGRAF_BINARY_PATH  = "/opt/yunion/bin/telegraf"
 	SUPERVISE_BINARY_PATH = "/opt/yunion/bin/supervise"
+
+	QGA_BINARY_PATH            = "/opt/yunion/bin/qemu-ga"
+	QGA_WIN_MSI_INSTALLER_PATH = "/opt/yunion/bin/qemu-ga-x86_64.msi"
 )
 
 var (
 	NetDevPrefix   = "eth"
 	NetDevPrefixEN = "en"
+
+	IBNetDevPrefix = "ib"
 )
 
 func GetNetDevPrefix(nics []*types.SServerNic) string {
@@ -65,6 +69,10 @@ func GetNetDevPrefix(nics []*types.SServerNic) string {
 	} else {
 		return NetDevPrefix
 	}
+}
+
+func GetIBNetDevPrefix() string {
+	return IBNetDevPrefix
 }
 
 func NicsHasDifferentDriver(nics []*types.SServerNic) bool {
@@ -100,6 +108,44 @@ func getHostname(hostname, domain string) string {
 	} else {
 		return hostname
 	}
+}
+
+func (l *sLinuxRootFs) DeployQgaService(rootFs IDiskPartition) error {
+	qemuGuestAgentPath := "/usr/bin/qemu-ga"
+	if rootFs.Exists(qemuGuestAgentPath, false) {
+		// qemu-ga has been installed
+		return nil
+	}
+	output, err := procutils.NewCommand("cp", "-f",
+		QGA_BINARY_PATH, path.Join(rootFs.GetMountPath(), qemuGuestAgentPath)).Output()
+	if err != nil {
+		return errors.Wrapf(err, "cp qga binary failed %s", output)
+	}
+	if l.isSupportSystemd() {
+		udevPath := "/etc/udev/rules.d/"
+		if rootFs.Exists(udevPath, false) {
+			rules := rootFs.ListDir(udevPath, false)
+			for _, rule := range rules {
+				if strings.Index(rule, "qemu-guest-agent.rules") > 0 {
+					rootFs.Remove(path.Join(udevPath, rule), false)
+				}
+			}
+			qgaRules := `SUBSYSTEM=="virtio-ports", ATTR{name}=="org.qemu.guest_agent.0", \
+  TAG+="systemd" ENV{SYSTEMD_WANTS}="qemu-guest-agent.service"` + "\n"
+			if err := rootFs.FilePutContents(path.Join(udevPath, "99-qemu-guest-agent.rules"), qgaRules, false, false); err != nil {
+				return err
+			}
+		}
+		if err := l.InstallQemuGuestAgentSystemd(); err != nil {
+			return errors.Wrap(err, "qga InstallQemuGuestAgentSystemd")
+		}
+	} else {
+		initCmd := qemuGuestAgentPath
+		if err := l.installCrond(initCmd); err != nil {
+			return errors.Wrap(err, "qga installCrond")
+		}
+	}
+	return nil
 }
 
 func (l *sLinuxRootFs) DeployQgaBlackList(rootFs IDiskPartition) error {
@@ -217,44 +263,7 @@ func (l *sLinuxRootFs) DeployPublicKey(rootFs IDiskPartition, selUsr string, pub
 	} else {
 		usrDir = path.Join("/home", selUsr)
 	}
-	return DeployAuthorizedKeys(rootFs, usrDir, pubkeys, false)
-}
-
-func (d *SCoreOsRootFs) DeployQgaBlackList(rootFs IDiskPartition) error {
-	var modeRwxOwner = syscall.S_IRUSR | syscall.S_IWUSR | syscall.S_IXUSR
-	var qgaConfDir = "/etc/sysconfig"
-	var etcSysconfigQemuga = path.Join(qgaConfDir, "qemu-ga")
-
-	if err := rootFs.Mkdir(qgaConfDir, modeRwxOwner, false); err != nil {
-		return errors.Wrap(err, "mkdir qga conf dir")
-	}
-	blackListContent := `# This is a systemd environment file, not a shell script.
-# It provides settings for \"/lib/systemd/system/qemu-guest-agent.service\".
-
-# Comma-separated blacklist of RPCs to disable, or empty list to enable all.
-#
-# You can get the list of RPC commands using \"qemu-ga --blacklist='?'\".
-# There should be no spaces between commas and commands in the blacklist.
-# BLACKLIST_RPC=guest-file-open,guest-file-close,guest-file-read,guest-file-write,guest-file-seek,guest-file-flush,guest-exec,guest-exec-status
-
-# Fsfreeze hook script specification.
-#
-# FSFREEZE_HOOK_PATHNAME=/dev/null           : disables the feature.
-#
-# FSFREEZE_HOOK_PATHNAME=/path/to/executable : enables the feature with the
-# specified binary or shell script.
-#
-# FSFREEZE_HOOK_PATHNAME=                    : enables the feature with the
-# default value (invoke \"qemu-ga --help\" to interrogate).
-FSFREEZE_HOOK_PATHNAME=/etc/qemu-ga/fsfreeze-hook"
-`
-
-	if rootFs.Exists(etcSysconfigQemuga, false) {
-		if err := rootFs.FilePutContents(etcSysconfigQemuga, blackListContent, false, false); err != nil {
-			return errors.Wrap(err, "etcSysconfigQemuga error")
-		}
-	}
-	return nil
+	return DeployAuthorizedKeys(rootFs, usrDir, pubkeys, false, false)
 }
 
 func (l *sLinuxRootFs) DeployYunionroot(rootFs IDiskPartition, pubkeys *deployapi.SSHKeys, isInit, enableCloudInit bool) error {
@@ -271,7 +280,7 @@ func (l *sLinuxRootFs) DeployYunionroot(rootFs IDiskPartition, pubkeys *deployap
 		return errors.Wrap(err, "unable to CheckOrAddUser")
 	}
 	log.Infof("DeployYunionroot %s home %s", yunionroot, rootdir)
-	err = DeployAuthorizedKeys(rootFs, rootdir, pubkeys, true)
+	err = DeployAuthorizedKeys(rootFs, rootdir, pubkeys, true, true)
 	if err != nil {
 		log.Infof("DeployAuthorizedKeys error: %s", err.Error())
 		return fmt.Errorf("DeployAuthorizedKeys: %v", err)
@@ -398,10 +407,13 @@ func (l *sLinuxRootFs) DeployNetworkingScripts(rootFs IDiskPartition, nics []*ty
 		for _, nic := range nics {
 			nicRules += `KERNEL=="*", SUBSYSTEM=="net", ACTION=="add", `
 			nicRules += `DRIVERS=="?*", `
-			mac := nic.Mac
-			nicRules += fmt.Sprintf(`ATTR{address}=="%s", ATTR{type}=="1", `, strings.ToLower(mac))
-			idx := nic.Index
-			nicRules += fmt.Sprintf("NAME=\"%s%d\"\n", netDevPrefix, idx)
+			if nic.NicType == api.NIC_TYPE_INFINIBAND {
+				nicRules += fmt.Sprintf(`ATTR{address}=="?*%s", ATTR{type}=="32", `, strings.ToLower(nic.Mac))
+				nicRules += fmt.Sprintf("NAME=\"%s%d\"\n", GetIBNetDevPrefix(), nic.Index)
+			} else {
+				nicRules += fmt.Sprintf(`ATTR{address}=="%s", ATTR{type}=="1", `, strings.ToLower(nic.Mac))
+				nicRules += fmt.Sprintf("NAME=\"%s%d\"\n", netDevPrefix, nic.Index)
+			}
 		}
 		if err := rootFs.FilePutContents(path.Join(udevPath, "70-persistent-net.rules"), nicRules, false, false); err != nil {
 			return err
@@ -475,6 +487,19 @@ func (l *sLinuxRootFs) DeployStandbyNetworkingScripts(rootFs IDiskPartition, nic
 	return nil
 }
 
+func (l *sLinuxRootFs) DeployUdevSubsystemScripts(rootFs IDiskPartition) error {
+	udevPath := "/etc/udev/rules.d/"
+	if rootFs.Exists(udevPath, false) {
+		cpuMemHotplugRules := `SUBSYSTEM=="cpu", ACTION=="add", TEST=="online", ATTR{online}=="0", ATTR{online}="1"
+SUBSYSTEM=="memory", ACTION=="add", TEST=="state", ATTR{state}=="offline", ATTR{state}="online"` + "\n"
+		if err := rootFs.FilePutContents(path.Join(udevPath, "80-hotplug-cpu-mem.rules"), cpuMemHotplugRules, false, false); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
 func (l *sLinuxRootFs) GetOs() string {
 	return "Linux"
 }
@@ -510,6 +535,7 @@ func (l *sLinuxRootFs) GetArch(rootFs IDiskPartition) string {
 					log.Errorf("failed read file elf %s: %s", rp, err)
 					continue
 				}
+				defer elfHeader.Close()
 				// https://en.wikipedia.org/wiki/Executable_and_Linkable_Format#File_header
 				switch elfHeader.Machine {
 				case elf.EM_X86_64:
@@ -580,10 +606,10 @@ func (l *sLinuxRootFs) PrepareFsForTemplate(rootFs IDiskPartition) error {
 		}
 	}
 	for _, dir := range []string{
-		"/var/spool",
+		// "/var/spool",
 		"/var/run",
 		"/run",
-		"/usr/local/var/spool",
+		// "/usr/local/var/spool",
 		"/usr/local/var/run",
 		"/etc/openvswitch",
 	} {
@@ -784,7 +810,10 @@ func (d *sLinuxRootFs) DeployTelegraf(config string) (bool, error) {
 		return false, errors.Wrap(err, "chmod supervise run script")
 	}
 	initCmd := fmt.Sprintf("%s/supervise %s", cloudMonitorPath, telegrafPath)
-	err = d.installInitScript("telegraf", initCmd)
+	if d.isSupportSystemd() {
+		initCmd = path.Join(telegrafPath, "run")
+	}
+	err = d.installInitScript("telegraf", initCmd, false)
 	if err != nil {
 		return false, errors.Wrap(err, "installInitScript")
 	}
@@ -832,7 +861,7 @@ func (d *sDebianLikeRootFs) PrepareFsForTemplate(rootFs IDiskPartition) error {
 	netplanDir := "/etc/netplan/"
 	if rootFs.Exists(netplanDir, false) {
 		for _, f := range rootFs.ListDir(netplanDir, false) {
-			rootFs.Remove(netplanDir+f, false)
+			rootFs.Remove(filepath.Join(netplanDir, f), false)
 		}
 	}
 	return nil
@@ -876,16 +905,6 @@ func getNicTeamingConfigCmds(slaves []*types.SServerNic) string {
 	return cmds.String()
 }
 
-func (d *sDebianLikeRootFs) deployNetplanConfigFile(rootFs IDiskPartition, nics []*types.SServerNic) error {
-	netplanDir := "/etc/netplan/"
-	dirExists := rootFs.Exists(netplanDir, false)
-	if !dirExists {
-		return nil
-	}
-
-	return nil
-}
-
 func (d *sDebianLikeRootFs) DeployNetworkingScripts(rootFs IDiskPartition, nics []*types.SServerNic) error {
 	if err := d.sLinuxRootFs.DeployNetworkingScripts(rootFs, nics); err != nil {
 		return err
@@ -904,25 +923,24 @@ func (d *sDebianLikeRootFs) DeployNetworkingScripts(rootFs IDiskPartition, nics 
 
 	// ToServerNics(nics)
 	allNics, bondNics := convertNicConfigs(nics)
+	nicCnt := len(allNics) - len(bondNics)
+
+	mainNic := getMainNic(allNics)
+	var mainIp string
+	if mainNic != nil {
+		mainIp = mainNic.Ip
+	}
 
 	netplanDir := "/etc/netplan"
 	if rootFs.Exists(netplanDir, false) {
 		for _, f := range rootFs.ListDir(netplanDir, false) {
-			rootFs.Remove(netplanDir+f, false)
+			rootFs.Remove(filepath.Join(netplanDir, f), false)
 		}
-		netplanConfig := NewNetplanConfig(allNics, bondNics)
+		netplanConfig := NewNetplanConfig(allNics, bondNics, mainIp)
+		log.Debugf("netplanConfig:\n %s", netplanConfig.YAMLString())
 		if err := rootFs.FilePutContents(path.Join(netplanDir, "config.yaml"), netplanConfig.YAMLString(), false, false); err != nil {
 			return errors.Wrap(err, "Put netplan config")
 		}
-	}
-
-	mainNic, err := getMainNic(allNics)
-	if err != nil {
-		return err
-	}
-	var mainIp string
-	if mainNic != nil {
-		mainIp = mainNic.Ip
 	}
 
 	var systemdResolveConfig strings.Builder
@@ -945,6 +963,7 @@ func (d *sDebianLikeRootFs) DeployNetworkingScripts(rootFs IDiskPartition, nics 
 			cmds.WriteString(fmt.Sprintf("iface %s inet static\n", nicDesc.Name))
 			cmds.WriteString(fmt.Sprintf("    address %s\n", nicDesc.Ip))
 			cmds.WriteString(fmt.Sprintf("    netmask %s\n", netmask))
+			cmds.WriteString(fmt.Sprintf("    hwaddress ether %s\n", nicDesc.Mac))
 			if len(nicDesc.Gateway) > 0 && nicDesc.Ip == mainIp {
 				cmds.WriteString(fmt.Sprintf("    gateway %s\n", nicDesc.Gateway))
 			}
@@ -952,7 +971,7 @@ func (d *sDebianLikeRootFs) DeployNetworkingScripts(rootFs IDiskPartition, nics 
 				cmds.WriteString(fmt.Sprintf("    mtu %d\n", nicDesc.Mtu))
 			}
 			var routes = make([][]string, 0)
-			netutils2.AddNicRoutes(&routes, nicDesc, mainIp, len(nics), privatePrefixes)
+			routes = netutils2.AddNicRoutes(routes, nicDesc, mainIp, nicCnt)
 			for _, r := range routes {
 				cmds.WriteString(fmt.Sprintf("    up route add -net %s gw %s || true\n", r[0], r[1]))
 				cmds.WriteString(fmt.Sprintf("    down route del -net %s gw %s || true\n", r[0], r[1]))
@@ -970,12 +989,32 @@ func (d *sDebianLikeRootFs) DeployNetworkingScripts(rootFs IDiskPartition, nics 
 				cmds.WriteString(getNicTeamingConfigCmds(nicDesc.TeamingSlaves))
 			}
 			cmds.WriteString("\n")
+			if len(nicDesc.Ip6) > 0 {
+				cmds.WriteString(fmt.Sprintf("iface %s inet6 static\n", nicDesc.Name))
+				cmds.WriteString(fmt.Sprintf("    address %s\n", nicDesc.Ip6))
+				cmds.WriteString(fmt.Sprintf("    netmask %d\n", nicDesc.Masklen6))
+				if len(nicDesc.Gateway6) > 0 && nicDesc.Ip == mainIp {
+					cmds.WriteString(fmt.Sprintf("    gateway %s\n", nicDesc.Gateway6))
+				}
+				cmds.WriteString("\n")
+			}
 		} else {
 			cmds.WriteString(fmt.Sprintf("iface %s inet dhcp\n", nicDesc.Name))
 			if len(nicDesc.TeamingSlaves) > 0 {
 				cmds.WriteString(getNicTeamingConfigCmds(nicDesc.TeamingSlaves))
 			}
 			cmds.WriteString("\n")
+			if len(nicDesc.Ip6) > 0 {
+				// ipv6 support static temporarily
+				// TODO
+				cmds.WriteString(fmt.Sprintf("iface %s inet6 static\n", nicDesc.Name))
+				cmds.WriteString(fmt.Sprintf("    address %s\n", nicDesc.Ip6))
+				cmds.WriteString(fmt.Sprintf("    netmask %d\n", nicDesc.Masklen6))
+				if len(nicDesc.Gateway6) > 0 && nicDesc.Ip == mainIp {
+					cmds.WriteString(fmt.Sprintf("    gateway %s\n", nicDesc.Gateway6))
+				}
+				cmds.WriteString("\n")
+			}
 		}
 	}
 
@@ -1272,25 +1311,18 @@ func (r *sRedhatLikeRootFs) Centos5DeployNetworkingScripts(rootFs IDiskPartition
 	return nil
 }
 
-func getMainNic(nics []*types.SServerNic) (*types.SServerNic, error) {
-	var mainIp netutils.IPV4Addr
-	var mainNic *types.SServerNic
+func getMainNic(nics []*types.SServerNic) *types.SServerNic {
 	for i := range nics {
-		if len(nics[i].Gateway) > 0 {
-			ipInt, err := netutils.NewIPV4Addr(nics[i].Ip)
-			if err != nil {
-				return nil, err
-			}
-			if mainIp == 0 {
-				mainIp = ipInt
-				mainNic = nics[i]
-			} else if !netutils.IsPrivate(ipInt) && netutils.IsPrivate(mainIp) {
-				mainIp = ipInt
-				mainNic = nics[i]
-			}
+		if nics[i].IsDefault {
+			return nics[i]
 		}
 	}
-	return mainNic, nil
+	for i := range nics {
+		if len(nics[i].Gateway) > 0 {
+			return nics[i]
+		}
+	}
+	return nil
 }
 
 func (r *sRedhatLikeRootFs) enableBondingModule(rootFs IDiskPartition, bondNics []*types.SServerNic) error {
@@ -1311,8 +1343,14 @@ func (r *sRedhatLikeRootFs) isNetworkManagerEnabled(rootFs IDiskPartition) bool 
 }
 
 func (r *sRedhatLikeRootFs) deployNetworkingScripts(rootFs IDiskPartition, nics []*types.SServerNic, relInfo *deployapi.ReleaseInfo) error {
-	if err := r.sLinuxRootFs.DeployNetworkingScripts(rootFs, nics); err != nil {
-		return err
+	// remove all ifcfg-*
+	const scriptPath = "/etc/sysconfig/network-scripts"
+	files := rootFs.ListDir(scriptPath, false)
+	for _, f := range files {
+		if strings.HasPrefix(f, "ifcfg-") && f != "ifcfg-lo" {
+			log.Infof("remove %s in %s", f, scriptPath)
+			rootFs.Remove(filepath.Join(scriptPath, f), false)
+		}
 	}
 
 	ver := strings.Split(relInfo.Version, ".")
@@ -1323,20 +1361,19 @@ func (r *sRedhatLikeRootFs) deployNetworkingScripts(rootFs IDiskPartition, nics 
 		err = r.sLinuxRootFs.DeployNetworkingScripts(rootFs, nics)
 	}
 	if err != nil {
-		return err
+		return errors.Wrap(err, "DeployNetworkingScripts")
 	}
 	// ToServerNics(nics)
 	allNics, bondNics := convertNicConfigs(nics)
 	if len(bondNics) > 0 {
 		err = r.enableBondingModule(rootFs, bondNics)
 		if err != nil {
-			return err
+			return errors.Wrap(err, "enableBondingModule")
 		}
 	}
-	mainNic, err := getMainNic(allNics)
-	if err != nil {
-		return err
-	}
+	nicCnt := len(allNics) - len(bondNics)
+
+	mainNic := getMainNic(allNics)
 	var mainIp string
 	if mainNic != nil {
 		mainIp = mainNic.Ip
@@ -1360,16 +1397,21 @@ func (r *sRedhatLikeRootFs) deployNetworkingScripts(rootFs IDiskPartition, nics 
 		if nicDesc.Mtu > 0 {
 			cmds.WriteString(fmt.Sprintf("MTU=%d\n", nicDesc.Mtu))
 		}
-		if len(nicDesc.Mac) > 0 {
-			cmds.WriteString("HWADDR=")
-			cmds.WriteString(nicDesc.Mac)
-			cmds.WriteString("\n")
+		if len(nicDesc.Mac) > 0 && nicDesc.NicType != api.NIC_TYPE_INFINIBAND {
+			if len(nicDesc.TeamingSlaves) == 0 {
+				// only real physical nic can set HWADDR
+				cmds.WriteString("HWADDR=")
+				cmds.WriteString(nicDesc.Mac)
+				cmds.WriteString("\n")
+			}
 			cmds.WriteString("MACADDR=")
 			cmds.WriteString(nicDesc.Mac)
 			cmds.WriteString("\n")
 		}
-		if len(nicDesc.TeamingSlaves) != 0 {
-			cmds.WriteString(`BONDING_OPTS="mode=4 miimon=100"\n`)
+		if len(nicDesc.TeamingSlaves) > 0 {
+			// bonding
+			cmds.WriteString(`BONDING_OPTS="mode=4 miimon=100"`)
+			cmds.WriteString("\n")
 		}
 		if nicDesc.TeamingMaster != nil {
 			cmds.WriteString("BOOTPROTO=none\n")
@@ -1398,7 +1440,7 @@ func (r *sRedhatLikeRootFs) deployNetworkingScripts(rootFs IDiskPartition, nics 
 				cmds.WriteString("\n")
 			}
 			var routes = make([][]string, 0)
-			netutils2.AddNicRoutes(&routes, nicDesc, mainIp, len(nics), privatePrefixes)
+			routes = netutils2.AddNicRoutes(routes, nicDesc, mainIp, nicCnt)
 			var rtbl strings.Builder
 			for _, r := range routes {
 				rtbl.WriteString(r[0])
@@ -1410,7 +1452,7 @@ func (r *sRedhatLikeRootFs) deployNetworkingScripts(rootFs IDiskPartition, nics 
 			}
 			rtblStr := rtbl.String()
 			if len(rtblStr) > 0 {
-				var fn = fmt.Sprintf("/etc/sysconfig/network-scripts/route-%s", nicDesc.Name)
+				var fn = fmt.Sprintf("%s/route-%s", scriptPath, nicDesc.Name)
 				if err := rootFs.FilePutContents(fn, rtblStr, false, false); err != nil {
 					return err
 				}
@@ -1425,10 +1467,30 @@ func (r *sRedhatLikeRootFs) deployNetworkingScripts(rootFs IDiskPartition, nics 
 					cmds.WriteString(fmt.Sprintf("DOMAIN=%s\n", nicDesc.Domain))
 				}
 			}
+			if len(nicDesc.Ip6) > 0 {
+				cmds.WriteString("IPV6INIT=yes\n")
+				cmds.WriteString("DHCPV6C=no\n")
+				cmds.WriteString("IPV6_AUTOCONF=no\n")
+				cmds.WriteString(fmt.Sprintf("IPV6ADDR=%s/%d\n", nicDesc.Ip6, nicDesc.Masklen6))
+				if len(nicDesc.Gateway6) > 0 {
+					cmds.WriteString(fmt.Sprintf("IPV6_DEFAULTGW=%s\n", nicDesc.Gateway6))
+				}
+			}
 		} else {
 			cmds.WriteString("BOOTPROTO=dhcp\n")
+			if len(nicDesc.Ip6) > 0 {
+				// IPv6 support static temporarily
+				// TODO
+				cmds.WriteString("IPV6INIT=yes\n")
+				cmds.WriteString("DHCPV6C=no\n")
+				cmds.WriteString("IPV6_AUTOCONF=no\n")
+				cmds.WriteString(fmt.Sprintf("IPV6ADDR=%s/%d\n", nicDesc.Ip6, nicDesc.Masklen6))
+				if len(nicDesc.Gateway6) > 0 {
+					cmds.WriteString(fmt.Sprintf("IPV6_DEFAULTGW=%s\n", nicDesc.Gateway6))
+				}
+			}
 		}
-		var fn = fmt.Sprintf("/etc/sysconfig/network-scripts/ifcfg-%s", nicDesc.Name)
+		var fn = fmt.Sprintf("%s/ifcfg-%s", scriptPath, nicDesc.Name)
 		log.Debugf("%s: %s", fn, cmds.String())
 		if err := rootFs.FilePutContents(fn, cmds.String(), false, false); err != nil {
 			return err
@@ -1536,7 +1598,7 @@ func (c *SCentosRootFs) GetReleaseInfo(rootFs IDiskPartition) *deployapi.Release
 func (c *SCentosRootFs) DeployNetworkingScripts(rootFs IDiskPartition, nics []*types.SServerNic) error {
 	relInfo := c.GetReleaseInfo(rootFs)
 	if err := c.sRedhatLikeRootFs.deployNetworkingScripts(rootFs, nics, relInfo); err != nil {
-		return err
+		return errors.Wrap(err, "sRedhatLikeRootFs.deployNetworkingScripts")
 	}
 	var udevPath = "/etc/udev/rules.d/"
 	var files = []string{"60-net.rules", "75-persistent-net-generator.rules"}
@@ -1544,7 +1606,7 @@ func (c *SCentosRootFs) DeployNetworkingScripts(rootFs IDiskPartition, nics []*t
 		sPath := path.Join(udevPath, f)
 		if !rootFs.Exists(sPath, false) {
 			if err := rootFs.FilePutContents(sPath, "", false, false); err != nil {
-				return err
+				return errors.Wrapf(err, "save %s", sPath)
 			}
 		}
 	}
@@ -1861,7 +1923,7 @@ func (d *SOpenWrtRootFs) DeployPublicKey(rootFs IDiskPartition, selUsr string, p
 			gid      = 0
 			replace  = false
 		)
-		return deployAuthorizedKeys(rootFs, authFile, uid, gid, pubkeys, replace)
+		return deployAuthorizedKeys(rootFs, authFile, uid, gid, pubkeys, replace, false)
 	}
 	return d.sLinuxRootFs.DeployPublicKey(rootFs, selUsr, pubkeys)
 }

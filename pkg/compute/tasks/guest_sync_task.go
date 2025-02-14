@@ -43,23 +43,29 @@ func init() {
 func (self *GuestSyncConfTask) OnInit(ctx context.Context, obj db.IStandaloneModel, data jsonutils.JSONObject) {
 	guest := obj.(*models.SGuest)
 	db.OpsLog.LogEvent(guest, db.ACT_SYNC_CONF, nil, self.UserCred)
-	if host, _ := guest.GetHost(); host == nil {
-		self.SetStageFailed(ctx, jsonutils.NewString("No host for sync"))
+	host, err := guest.GetHost()
+	if err != nil {
+		self.SetStageFailed(ctx, jsonutils.NewString(err.Error()))
 		return
-	} else {
-		self.SetStage("OnSyncComplete", nil)
-		if err := guest.GetDriver().RequestSyncConfigOnHost(ctx, guest, host, self); err != nil {
-			self.SetStageFailed(ctx, jsonutils.NewString(err.Error()))
-			log.Errorf("SyncConfTask faled %v", err)
-		}
+	}
+	self.SetStage("OnSyncComplete", nil)
+	drv, err := guest.GetDriver()
+	if err != nil {
+		self.SetStageFailed(ctx, jsonutils.NewString(err.Error()))
+		return
+	}
+	err = drv.RequestSyncConfigOnHost(ctx, guest, host, self)
+	if err != nil {
+		self.SetStageFailed(ctx, jsonutils.NewString(err.Error()))
 	}
 }
 
 func (self *GuestSyncConfTask) OnSyncComplete(ctx context.Context, obj db.IStandaloneModel, data jsonutils.JSONObject) {
 	guest := obj.(*models.SGuest)
+	fwOnly, _ := self.GetParams().Bool("fw_only")
 	if restart, _ := self.Params.Bool("restart_network"); restart {
 		self.StartRestartNetworkTask(ctx, guest)
-	} else if data.Contains("task") {
+	} else if !fwOnly && data.Contains("task") {
 		// XXX this is only applied to KVM, which will call task_complete twice
 		self.SetStage("OnDiskSyncComplete", nil)
 	} else {
@@ -94,8 +100,15 @@ func (self *GuestSyncConfTask) StartRestartNetworkTask(ctx context.Context, gues
 
 	// try use qga restart network
 	err = func() error {
-		host, _ := guest.GetHost()
-		err = guest.GetDriver().QgaRequestGuestPing(ctx, self.GetTaskRequestHeader(), host, guest, false, &api.ServerQgaTimeoutInput{1000})
+		host, err := guest.GetHost()
+		if err != nil {
+			return err
+		}
+		drv, err := guest.GetDriver()
+		if err != nil {
+			return err
+		}
+		err = drv.QgaRequestGuestPing(ctx, self.GetTaskRequestHeader(), host, guest, false, &api.ServerQgaTimeoutInput{1000})
 		if err != nil {
 			return errors.Wrap(err, "qga guest-ping")
 		}
@@ -120,7 +133,7 @@ func (self *GuestSyncConfTask) StartRestartNetworkTask(ctx context.Context, gues
 	}()
 	if err != nil {
 		log.Errorf("guest %s failed start qga restart network task: %s", guest.GetName(), err)
-		guest.SetStatus(self.GetUserCred(), api.VM_QGA_SET_NETWORK_FAILED, err.Error())
+		guest.SetStatus(ctx, self.GetUserCred(), api.VM_QGA_SET_NETWORK_FAILED, err.Error())
 		logclient.AddActionLogWithStartable(self, guest, logclient.ACT_RESTART_NETWORK, jsonutils.NewString(err.Error()), self.UserCred, false)
 	}
 }
@@ -139,7 +152,7 @@ func (self *GuestSyncConfTask) OnDiskSyncCompleteFailed(ctx context.Context, obj
 	db.OpsLog.LogEvent(guest, db.ACT_SYNC_CONF_FAIL, data, self.UserCred)
 	logclient.AddActionLogWithStartable(self, guest, logclient.ACT_VM_SYNC_CONF, data, self.UserCred, false)
 	if !jsonutils.QueryBoolean(self.Params, "without_sync_status", false) {
-		guest.SetStatus(self.GetUserCred(), api.VM_SYNC_FAIL, data.String())
+		guest.SetStatus(ctx, self.GetUserCred(), api.VM_SYNC_FAIL, data.String())
 	}
 	self.SetStageFailed(ctx, data)
 }
@@ -147,7 +160,7 @@ func (self *GuestSyncConfTask) OnDiskSyncCompleteFailed(ctx context.Context, obj
 func (self *GuestSyncConfTask) OnSyncCompleteFailed(ctx context.Context, obj db.IStandaloneModel, data jsonutils.JSONObject) {
 	guest := obj.(*models.SGuest)
 	if !jsonutils.QueryBoolean(self.Params, "without_sync_status", false) {
-		guest.SetStatus(self.GetUserCred(), api.VM_SYNC_FAIL, data.String())
+		guest.SetStatus(ctx, self.GetUserCred(), api.VM_SYNC_FAIL, data.String())
 	}
 	logclient.AddActionLogWithStartable(self, guest, logclient.ACT_VM_SYNC_CONF, data, self.UserCred, false)
 	db.OpsLog.LogEvent(guest, db.ACT_SYNC_CONF_FAIL, data, self.UserCred)

@@ -18,6 +18,7 @@ import (
 	"yunion.io/x/jsonutils"
 
 	api "yunion.io/x/onecloud/pkg/apis/compute"
+	"yunion.io/x/onecloud/pkg/apis/host"
 )
 
 type SGuestCpu struct {
@@ -37,14 +38,9 @@ type SGuestCpu struct {
 	// CpuCacheMode string
 }
 
-type CpuPin struct {
+type SCpuPin struct {
 	Vcpus string
 	Pcpus string
-}
-
-type SMemObject struct {
-	*Object
-	SizeMB int64
 }
 
 type SMemDevice struct {
@@ -55,8 +51,36 @@ type SMemDevice struct {
 type SMemSlot struct {
 	SizeMB int64
 
-	MemObj *Object
+	MemObj *SMemDesc
 	MemDev *SMemDevice
+}
+
+type SCpuNumaPin struct {
+	SizeMB    int64
+	Unregular bool
+	NodeId    *uint16 `json:",omitempty"`
+
+	VcpuPin       []SVCpuPin `json:",omitempty"`
+	ExtraCpuCount int        `json:"extra_cpu_count"`
+}
+
+type SVCpuPin struct {
+	Vcpu int
+	Pcpu int
+}
+
+type SMemDesc struct {
+	*Object
+
+	NodeId *uint16 `json:",omitempty"`
+	// vcpus
+	Cpus *string `json:",omitempty"`
+}
+
+type SMemsDesc struct {
+	SMemDesc
+
+	Mems []SMemDesc `json:",omitempty"`
 }
 
 type SGuestMem struct {
@@ -64,19 +88,22 @@ type SGuestMem struct {
 	MaxMem uint
 
 	SizeMB int64
-	Mem    *Object `json:",omitempty"`
 
+	Mem *SMemsDesc `json:",omitempty"`
+
+	// hotplug mem devices
 	MemSlots []*SMemSlot `json:",omitempty"`
 }
 
 type SGuestHardwareDesc struct {
 	Cpu     int64
 	CpuDesc *SGuestCpu `json:",omitempty"`
-	VcpuPin []CpuPin   `json:",omitempty"`
+	VcpuPin []SCpuPin  `json:",omitempty"`
 	// Clock   *SGuestClock `json:",omitempty"`
 
-	Mem     int64
-	MemDesc *SGuestMem `json:",omitempty"`
+	Mem        int64
+	MemDesc    *SGuestMem     `json:",omitempty"`
+	CpuNumaPin []*SCpuNumaPin `json:",omitempty"`
 
 	Bios      string
 	BootOrder string
@@ -98,6 +125,7 @@ type SGuestHardwareDesc struct {
 
 	VirtioScsi      *SGuestVirtioScsi       `json:",omitempty"`
 	PvScsi          *SGuestPvScsi           `json:",omitempty"`
+	SataController  *SGuestAhciDevice       `json:",omitempty"`
 	Cdroms          []*SGuestCdrom          `json:"cdroms,omitempty"`
 	Floppys         []*SGuestFloppy         `json:",omitempty"`
 	Disks           []*SGuestDisk           `json:",omitempty"`
@@ -313,6 +341,10 @@ type SGuestPvScsi struct {
 	*PCIDevice
 }
 
+type SGuestAhciDevice struct {
+	*PCIDevice
+}
+
 type SGuestProjectDesc struct {
 	Tenant        string
 	TenantId      string
@@ -321,10 +353,12 @@ type SGuestProjectDesc struct {
 }
 
 type SGuestRegionDesc struct {
-	Zone     string
-	Domain   string
-	HostId   string
-	Hostname string
+	Zone         string `json:"zone"`
+	Domain       string `json:"domain"`
+	HostId       string `json:"host_id"`
+	Hostname     string `json:"hostname"`
+	HostAccessIp string `json:"host_access_ip"`
+	HostEIP      string `json:"host_eip"`
 }
 
 type SGuestControlDesc struct {
@@ -343,7 +377,8 @@ type SGuestControlDesc struct {
 
 	EncryptKeyId string
 
-	LightMode bool // light mode
+	LightMode  bool // light mode
+	Hypervisor string
 }
 
 type SGuestMetaDesc struct {
@@ -359,10 +394,15 @@ type SGuestMetaDesc struct {
 	ExtraOptions map[string]jsonutils.JSONObject
 }
 
+type SGuestContainerDesc struct {
+	Containers []*host.ContainerDesc
+}
+
 type SGuestDesc struct {
 	SGuestProjectDesc
 	SGuestRegionDesc
 	SGuestControlDesc
 	SGuestHardwareDesc
 	SGuestMetaDesc
+	SGuestContainerDesc
 }

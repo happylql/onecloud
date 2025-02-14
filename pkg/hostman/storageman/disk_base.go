@@ -17,17 +17,21 @@ package storageman
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"path"
 
 	"yunion.io/x/jsonutils"
 	"yunion.io/x/log"
 	"yunion.io/x/pkg/errors"
+	"yunion.io/x/pkg/util/httputils"
 
 	"yunion.io/x/onecloud/pkg/apis"
 	api "yunion.io/x/onecloud/pkg/apis/compute"
+	container_storage "yunion.io/x/onecloud/pkg/hostman/container/storage"
 	"yunion.io/x/onecloud/pkg/hostman/guestman/desc"
 	deployapi "yunion.io/x/onecloud/pkg/hostman/hostdeployer/apis"
 	"yunion.io/x/onecloud/pkg/hostman/hostdeployer/deployclient"
+	"yunion.io/x/onecloud/pkg/mcclient/auth"
 	"yunion.io/x/onecloud/pkg/util/qemuimg"
 	"yunion.io/x/onecloud/pkg/util/seclib2"
 )
@@ -45,6 +49,8 @@ type IDisk interface {
 	GetSnapshotDir() string
 	DoDeleteSnapshot(snapshotId string) error
 	GetSnapshotLocation() string
+	GetSnapshotPath(snapshotId string) string
+	RollbackDiskOnSnapshotFail(snapshotId string) error
 
 	GetStorage() IStorage
 
@@ -53,28 +59,32 @@ type IDisk interface {
 	DiskDeleteSnapshot(ctx context.Context, params interface{}) (jsonutils.JSONObject, error)
 	Delete(ctx context.Context, params interface{}) (jsonutils.JSONObject, error)
 	Resize(ctx context.Context, params interface{}) (jsonutils.JSONObject, error)
+	PreResize(ctx context.Context, sizeMb int64) error
 	PrepareSaveToGlance(ctx context.Context, params interface{}) (jsonutils.JSONObject, error)
 	ResetFromSnapshot(ctx context.Context, params interface{}) (jsonutils.JSONObject, error)
 	CleanupSnapshots(ctx context.Context, params interface{}) (jsonutils.JSONObject, error)
 
 	PrepareMigrate(liveMigrate bool) ([]string, string, bool, error)
+	RebuildSlaveDisk(diskUri string) error
 	CreateFromUrl(ctx context.Context, url string, size int64, callback func(progress, progressMbps float64, totalSizeMb int64)) error
 	CreateFromTemplate(context.Context, string, string, int64, *apis.SEncryptInfo) (jsonutils.JSONObject, error)
-	CreateFromSnapshotLocation(ctx context.Context, location string, size int64, encryptInfo *apis.SEncryptInfo) error
+	CreateFromSnapshotLocation(ctx context.Context, location string, size int64, encryptInfo *apis.SEncryptInfo) (jsonutils.JSONObject, error)
 	CreateFromRbdSnapshot(ctx context.Context, snapshotId, srcDiskId, srcPool string) error
-	CreateFromImageFuse(ctx context.Context, url string, size int64, encryptInfo *apis.SEncryptInfo) error
-	CreateRaw(ctx context.Context, sizeMb int, diskFormat string, fsFormat string,
-		encryptInfo *apis.SEncryptInfo, diskId string, back string) (jsonutils.JSONObject, error)
-	PostCreateFromImageFuse()
+	CreateFromRemoteHostImage(ctx context.Context, url string, size int64, encryptInfo *apis.SEncryptInfo) error
+	CreateRaw(ctx context.Context, sizeMb int, diskFormat string, fsFormat string, fsFeatures *api.DiskFsFeatures, encryptInfo *apis.SEncryptInfo, diskId string, back string) (jsonutils.JSONObject, error)
+	PostCreateFromRemoteHostImage(diskUrl string)
 	CreateSnapshot(snapshotId string, encryptKey string, encFormat qemuimg.TEncryptFormat, encAlg seclib2.TSymEncAlg) error
-	DeleteSnapshot(snapshotId, convertSnapshot string, pendingDelete bool) error
+	DeleteSnapshot(snapshotId, convertSnapshot string, blockStream bool, encryptInfo apis.SEncryptInfo) error
 	DeployGuestFs(diskInfo *deployapi.DiskInfo, guestDesc *desc.SGuestDesc,
 		deployInfo *deployapi.DeployInfo) (jsonutils.JSONObject, error)
+	ConvertSnapshot(convertSnapshotId string, encryptInfo apis.SEncryptInfo) error
 
 	// GetBackupDir() string
 	DiskBackup(ctx context.Context, params interface{}) (jsonutils.JSONObject, error)
 
 	IsFile() bool
+
+	GetContainerStorageDriver() (container_storage.IContainerStorage, error)
 }
 
 type SBaseDisk struct {
@@ -117,11 +127,11 @@ func (d *SBaseDisk) CreateFromTemplate(context.Context, string, string, int64, *
 	return nil, errors.Errorf("unsupported operation")
 }
 
-func (d *SBaseDisk) CreateFromSnapshotLocation(ctx context.Context, location string, size int64, encryptInfo *apis.SEncryptInfo) error {
-	return errors.Errorf("unsupported operation")
+func (d *SBaseDisk) CreateFromSnapshotLocation(ctx context.Context, location string, size int64, encryptInfo *apis.SEncryptInfo) (jsonutils.JSONObject, error) {
+	return nil, errors.Errorf("Not implemented")
 }
 
-func (d *SBaseDisk) CreateFromImageFuse(ctx context.Context, url string, size int64, encryptInfo *apis.SEncryptInfo) error {
+func (d *SBaseDisk) CreateFromRemoteHostImage(ctx context.Context, url string, size int64, encryptInfo *apis.SEncryptInfo) error {
 	return errors.Errorf("unsupported operation")
 }
 
@@ -129,11 +139,19 @@ func (d *SBaseDisk) Resize(context.Context, interface{}) (jsonutils.JSONObject, 
 	return nil, errors.Errorf("unsupported operation")
 }
 
+func (d *SBaseDisk) PreResize(ctx context.Context, sizeMb int64) error {
+	return nil
+}
+
 func (d *SBaseDisk) CreateSnapshot(snapshotId string, encryptKey string, encFormat qemuimg.TEncryptFormat, encAlg seclib2.TSymEncAlg) error {
 	return errors.Errorf("unsupported operation")
 }
 
-func (d *SBaseDisk) DeleteSnapshot(snapshotId, convertSnapshot string, pendingDelete bool) error {
+func (d *SBaseDisk) ConvertSnapshot(convertSnapshotId string, encryptInfo apis.SEncryptInfo) error {
+	return errors.Errorf("unsupported operation")
+}
+
+func (d *SBaseDisk) DeleteSnapshot(snapshotId, convertSnapshot string, blockStream bool, encryptInfo apis.SEncryptInfo) error {
 	return errors.Errorf("unsupported operation")
 }
 
@@ -157,7 +175,11 @@ func (d *SBaseDisk) PrepareMigrate(liveMigrate bool) ([]string, string, bool, er
 	return nil, "", false, errors.Errorf("unsupported operation")
 }
 
-func (d *SBaseDisk) PostCreateFromImageFuse() {
+func (d *SBaseDisk) RebuildSlaveDisk(diskUri string) error {
+	return nil
+}
+
+func (d *SBaseDisk) PostCreateFromRemoteHostImage(string) {
 }
 
 func (d *SBaseDisk) GetZoneId() string {
@@ -195,14 +217,33 @@ func (d *SBaseDisk) GetSnapshotLocation() string {
 	return ""
 }
 
-func (d *SBaseDisk) FormatFs(fsFormat, uuid string, diskInfo *deployapi.DiskInfo) {
-	log.Infof("Make disk %s fs %s", uuid, fsFormat)
+func (d *SBaseDisk) GetSnapshotPath(snapshotId string) string {
+	return ""
+}
+
+func ConvertDiskFsFeaturesToDeploy(fsFeatures *api.DiskFsFeatures) *deployapi.FsFeatures {
+	if fsFeatures == nil {
+		return nil
+	}
+	ret := &deployapi.FsFeatures{}
+	if fsFeatures.Ext4 != nil {
+		ret.Ext4 = &deployapi.FsExt4Features{
+			CaseInsensitive:          fsFeatures.Ext4.CaseInsensitive,
+			ReservedBlocksPercentage: int32(fsFeatures.Ext4.ReservedBlocksPercentage),
+		}
+	}
+	return ret
+}
+
+func (d *SBaseDisk) FormatFs(fsFormat string, fsFeatures *api.DiskFsFeatures, uuid string, diskInfo *deployapi.DiskInfo) {
+	log.Infof("Make disk %s fs %s, features: %s", uuid, fsFormat, jsonutils.Marshal(fsFeatures))
 	_, err := deployclient.GetDeployClient().FormatFs(
 		context.Background(),
 		&deployapi.FormatFsParams{
-			DiskInfo: diskInfo,
-			FsFormat: fsFormat,
-			Uuid:     uuid,
+			DiskInfo:   diskInfo,
+			FsFormat:   fsFormat,
+			FsFeatures: ConvertDiskFsFeaturesToDeploy(fsFeatures),
+			Uuid:       uuid,
 		},
 	)
 	if err != nil {
@@ -226,6 +267,54 @@ func (d *SBaseDisk) DoDeleteSnapshot(snapshotId string) error {
 	return fmt.Errorf("Not implement disk.DoDeleteSnapshot")
 }
 
+func (d *SBaseDisk) RollbackDiskOnSnapshotFail(snapshotId string) error {
+	return errors.Errorf("Not implement disk.DoDeleteSnapshot")
+}
+
 func (d *SBaseDisk) GetBackupDir() string {
 	return ""
+}
+
+func (d *SBaseDisk) GetContainerStorageDriver() (container_storage.IContainerStorage, error) {
+	return nil, errors.Wrap(errors.ErrNotImplemented, "GetContainerStorageDriver")
+}
+
+func (d *SBaseDisk) RequestExportNbdImage(ctx context.Context, url string, encryptInfo *apis.SEncryptInfo) (int64, error) {
+	body := jsonutils.NewDict()
+	body.Set("disk_id", jsonutils.NewString(d.GetId()))
+	header := http.Header{}
+	userCred := auth.AdminCredential()
+	header.Set("X-Auth-Token", userCred.GetTokenString())
+	if encryptInfo != nil {
+		header.Set("X-Encrypt-Key", encryptInfo.Key)
+		header.Set("X-Encrypt-Alg", string(encryptInfo.Alg))
+	}
+
+	url = fmt.Sprintf("%s/%s", url, "nbd-export")
+	httpClient := httputils.GetDefaultClient()
+	_, respBody, err := httputils.JSONRequest(httpClient, ctx, "POST", url, header, body, false)
+	if err != nil {
+		return -1, errors.Wrap(err, "request export image")
+	}
+	nbdPort, err := respBody.Int("nbd_port")
+	if err != nil {
+		return -1, errors.Wrapf(err, "failed get nbd port from %s", url)
+	}
+	return nbdPort, nil
+}
+
+func (d *SBaseDisk) RequestCloseNbdImage(ctx context.Context, url string) error {
+	body := jsonutils.NewDict()
+	body.Set("disk_id", jsonutils.NewString(d.GetId()))
+	header := http.Header{}
+	userCred := auth.AdminCredential()
+	header.Set("X-Auth-Token", userCred.GetTokenString())
+
+	url = fmt.Sprintf("%s/%s", url, "nbd-close")
+	httpClient := httputils.GetDefaultClient()
+	_, _, err := httputils.JSONRequest(httpClient, ctx, "POST", url, header, body, false)
+	if err != nil {
+		return errors.Wrap(err, "request close image")
+	}
+	return nil
 }

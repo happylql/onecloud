@@ -38,11 +38,19 @@ func (self *GuestPublicipToEipTask) OnInit(ctx context.Context, obj db.IStandalo
 	guest := obj.(*models.SGuest)
 
 	self.SetStage("OnEipConvertComplete", nil)
-	err := guest.GetDriver().RequestConvertPublicipToEip(ctx, self.GetUserCred(), guest, self)
+	drv, err := guest.GetDriver()
 	if err != nil {
 		db.OpsLog.LogEvent(guest, db.ACT_EIP_CONVERT_FAIL, err, self.UserCred)
 		logclient.AddActionLogWithStartable(self, guest, logclient.ACT_EIP_CONVERT, err, self.UserCred, false)
-		guest.SetStatus(self.GetUserCred(), api.VM_EIP_CONVERT_FAILED, err.Error())
+		guest.SetStatus(ctx, self.GetUserCred(), api.VM_EIP_CONVERT_FAILED, err.Error())
+		self.SetStageFailed(ctx, jsonutils.NewString(err.Error()))
+		return
+	}
+	err = drv.RequestConvertPublicipToEip(ctx, self.GetUserCred(), guest, self)
+	if err != nil {
+		db.OpsLog.LogEvent(guest, db.ACT_EIP_CONVERT_FAIL, err, self.UserCred)
+		logclient.AddActionLogWithStartable(self, guest, logclient.ACT_EIP_CONVERT, err, self.UserCred, false)
+		guest.SetStatus(ctx, self.GetUserCred(), api.VM_EIP_CONVERT_FAILED, err.Error())
 		self.SetStageFailed(ctx, jsonutils.NewString(err.Error()))
 		return
 	}
@@ -56,7 +64,7 @@ func (self *GuestPublicipToEipTask) OnEipConvertComplete(ctx context.Context, gu
 
 func (self *GuestPublicipToEipTask) OnEipConvertCompleteFailed(ctx context.Context, guest *models.SGuest, data jsonutils.JSONObject) {
 	logclient.AddActionLogWithStartable(self, guest, logclient.ACT_EIP_CONVERT, data, self.UserCred, false)
-	guest.SetStatus(self.UserCred, api.VM_EIP_CONVERT_FAILED, data.String())
+	guest.SetStatus(ctx, self.UserCred, api.VM_EIP_CONVERT_FAILED, data.String())
 	self.SetStageFailed(ctx, data)
 }
 

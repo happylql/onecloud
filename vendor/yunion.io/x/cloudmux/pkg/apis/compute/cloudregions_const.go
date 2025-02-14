@@ -136,6 +136,7 @@ const (
 	CITY_PHOENIX        = "Phoenix"        //菲尼克斯
 	CITY_DALLAS         = "Dallas"         //达拉斯
 	CITY_COLUMBUS       = "Columbus"       //哥伦布
+	CITY_INDIANAPOLIS   = "Indianapolis"   //印第安纳波利斯
 
 	// 英国
 	CITY_LONDON      = "London"      //伦敦
@@ -144,6 +145,7 @@ const (
 
 	// 阿拉伯联合酋长国
 	CITY_DUBAI     = "Dubai"     //迪拜
+	CITY_DAMMAN    = "Damman"    //达曼
 	CITY_ABU_DHABI = "Abu Dhabi" // 阿布扎比
 
 	// 德国
@@ -170,7 +172,8 @@ const (
 	CITY_TARN   = "Tarn"   //塔恩
 
 	// 瑞典
-	CITY_STOCKHOLM = "Stockholm" //斯德哥尔摩
+	CITY_STOCKHOLM = "Stockholm" // 斯德哥尔摩
+	CITY_SANDVIKEN = "Sandviken" // 桑德维肯
 
 	// 波兰
 	CITY_WARSAW = "Warsaw" // 华沙
@@ -213,9 +216,13 @@ const (
 
 	// 意大利
 	CITY_MILAN = "Milan" // 米兰
+	CITY_TURIN = "Turin" // 都灵
 
 	// 西班牙
 	CITY_MADRID = "Madrid" // 马德里
+
+	// 卡塔尔
+	CITY_DOHA = "Doha" // 多哈
 
 	COUNTRY_CODE_CN = "CN" //中国
 	COUNTRY_CODE_JP = "JP" //日本
@@ -251,4 +258,5 @@ const (
 	COUNTRY_CODE_IL = "IL" //以色列
 	COUNTRY_CODE_IT = "IT" //意大利
 	COUNTRY_CODE_ES = "ES" //西班牙
+	COUNTRY_CODE_QA = "QA" //卡塔尔
 )

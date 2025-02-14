@@ -494,6 +494,12 @@ var (
 		City:        CITY_PARIS,
 		CountryCode: COUNTRY_CODE_FR,
 	}
+	RegionTurin = cloudprovider.SGeographicInfo{
+		Latitude:    45.07,
+		Longitude:   7.63,
+		City:        CITY_TURIN,
+		CountryCode: COUNTRY_CODE_IT,
+	}
 	RegionAllier = cloudprovider.SGeographicInfo{
 		Latitude:    46.518,
 		Longitude:   3.359,
@@ -510,6 +516,12 @@ var (
 		Latitude:    59.195,
 		Longitude:   18.47,
 		City:        CITY_STOCKHOLM,
+		CountryCode: COUNTRY_CODE_SE,
+	}
+	RegionSandviken = cloudprovider.SGeographicInfo{
+		Latitude:    59,
+		Longitude:   27.66,
+		City:        CITY_SANDVIKEN,
 		CountryCode: COUNTRY_CODE_SE,
 	}
 	RegionDelmenhorst = cloudprovider.SGeographicInfo{
@@ -696,10 +708,34 @@ var (
 		CountryCode: COUNTRY_CODE_US,
 	}
 	RegionColumbus = cloudprovider.SGeographicInfo{
+		Latitude:    39.983,
+		Longitude:   -83.156,
+		City:        CITY_COLUMBUS,
+		CountryCode: COUNTRY_CODE_US,
+	}
+	RegionIndianapolis = cloudprovider.SGeographicInfo{
+		Latitude:    39.78,
+		Longitude:   -82.62,
+		City:        CITY_INDIANAPOLIS,
+		CountryCode: COUNTRY_CODE_US,
+	}
+	RegionTelAviv = cloudprovider.SGeographicInfo{
 		Latitude:    32.088,
 		Longitude:   34.762,
 		City:        CITY_TEL_AVIV,
 		CountryCode: COUNTRY_CODE_IL,
+	}
+	RegionDamman = cloudprovider.SGeographicInfo{
+		Latitude:    26.36,
+		Longitude:   49.91,
+		City:        CITY_DAMMAN,
+		CountryCode: COUNTRY_CODE_AE,
+	}
+	RegionDoha = cloudprovider.SGeographicInfo{
+		Latitude:    25.28,
+		Longitude:   51.43,
+		City:        CITY_DOHA,
+		CountryCode: COUNTRY_CODE_QA,
 	}
 	RegionNorthCalifornia = cloudprovider.SGeographicInfo{
 		Latitude:    38.838,

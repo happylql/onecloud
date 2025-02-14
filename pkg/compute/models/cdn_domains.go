@@ -291,7 +291,7 @@ func (self *SCDNDomain) SyncWithCloudCDNDomain(ctx context.Context, userCred mcc
 	}
 
 	if provider := self.GetCloudprovider(); provider != nil {
-		SyncCloudProject(ctx, userCred, self, provider.GetOwnerId(), ext, self.ManagerId)
+		SyncCloudProject(ctx, userCred, self, provider.GetOwnerId(), ext, provider)
 	}
 
 	return nil
@@ -323,7 +323,7 @@ func (self *SCloudprovider) newFromCloudCDNDomain(ctx context.Context, userCred 
 	}
 
 	syncVirtualResourceMetadata(ctx, userCred, &domain, ext, false)
-	SyncCloudProject(ctx, userCred, &domain, self.GetOwnerId(), ext, self.Id)
+	SyncCloudProject(ctx, userCred, &domain, self.GetOwnerId(), ext, self)
 
 	db.OpsLog.LogEvent(&domain, db.ACT_CREATE, domain.GetShortDesc(ctx), userCred)
 	notifyclient.EventNotify(ctx, userCred, notifyclient.SEventNotifyParam{
@@ -344,7 +344,7 @@ func (manager *SCDNDomainManager) ValidateCreateData(
 	if len(input.CloudproviderId) == 0 {
 		return input, httperrors.NewMissingParameterError("cloudprovider_id")
 	}
-	_provider, err := validators.ValidateModel(userCred, CloudproviderManager, &input.CloudproviderId)
+	_provider, err := validators.ValidateModel(ctx, userCred, CloudproviderManager, &input.CloudproviderId)
 	if err != nil {
 		return input, err
 	}
@@ -375,7 +375,7 @@ func (self *SCDNDomain) StartCdnCreateTask(ctx context.Context, userCred mcclien
 	if err != nil {
 		return errors.Wrapf(err, "NewTask")
 	}
-	self.SetStatus(userCred, apis.STATUS_CREATING, "")
+	self.SetStatus(ctx, userCred, apis.STATUS_CREATING, "")
 	return task.ScheduleRun(nil)
 }
 
@@ -392,14 +392,14 @@ func (self *SCDNDomain) StartDeleteTask(ctx context.Context, userCred mcclient.T
 		return task.ScheduleRun(nil)
 	}()
 	if err != nil {
-		self.SetStatus(userCred, api.CDN_DOMAIN_STATUS_DELETE_FAILED, err.Error())
+		self.SetStatus(ctx, userCred, api.CDN_DOMAIN_STATUS_DELETE_FAILED, err.Error())
 		return nil
 	}
 	return nil
 }
 
 func (self *SCDNDomain) Delete(ctx context.Context, userCred mcclient.TokenCredential) error {
-	self.SetStatus(userCred, api.CDN_DOMAIN_STATUS_DELETING, "")
+	self.SetStatus(ctx, userCred, api.CDN_DOMAIN_STATUS_DELETING, "")
 	return nil
 }
 
@@ -546,7 +546,7 @@ func (self *SCDNDomain) StartRemoteUpdateTask(ctx context.Context, userCred mccl
 	if err != nil {
 		return errors.Wrap(err, "NewTask")
 	}
-	self.SetStatus(userCred, apis.STATUS_UPDATE_TAGS, "StartRemoteUpdateTask")
+	self.SetStatus(ctx, userCred, apis.STATUS_UPDATE_TAGS, "StartRemoteUpdateTask")
 	return task.ScheduleRun(nil)
 }
 

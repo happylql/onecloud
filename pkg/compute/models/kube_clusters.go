@@ -42,6 +42,8 @@ import (
 	"yunion.io/x/onecloud/pkg/util/stringutils2"
 )
 
+// +onecloud:swagger-gen-model-singular=cloud_kube_cluster
+// +onecloud:swagger-gen-model-plural=cloud_kube_clusters
 type SKubeClusterManager struct {
 	db.SEnabledStatusInfrasResourceBaseManager
 	db.SExternalizedResourceBaseManager
@@ -225,7 +227,7 @@ func (self *SKubeCluster) syncRemoveCloudKubeCluster(ctx context.Context, userCr
 
 	err := self.ValidateDeleteCondition(ctx, nil)
 	if err != nil { // cannot delete
-		self.SetStatus(userCred, apis.STATUS_UNKNOWN, "sync to delete")
+		self.SetStatus(ctx, userCred, apis.STATUS_UNKNOWN, "sync to delete")
 		return errors.Wrapf(err, "ValidateDeleteCondition")
 	}
 	return self.RealDelete(ctx, userCred)
@@ -459,7 +461,7 @@ func (manager *SKubeClusterManager) ValidateCreateData(
 	if len(input.VpcId) == 0 {
 		return nil, httperrors.NewMissingParameterError("vpc_id")
 	}
-	vpcObj, err := validators.ValidateModel(userCred, VpcManager, &input.VpcId)
+	vpcObj, err := validators.ValidateModel(ctx, userCred, VpcManager, &input.VpcId)
 	if err != nil {
 		return nil, err
 	}
@@ -478,7 +480,7 @@ func (manager *SKubeClusterManager) ValidateCreateData(
 		return nil, httperrors.NewMissingParameterError("network_ids")
 	}
 	for i := range input.NetworkIds {
-		_, err = validators.ValidateModel(userCred, NetworkManager, &input.NetworkIds[i])
+		_, err = validators.ValidateModel(ctx, userCred, NetworkManager, &input.NetworkIds[i])
 		if err != nil {
 			return nil, err
 		}
@@ -505,7 +507,7 @@ func (self *SKubeCluster) StartKubeClusterCreateTask(ctx context.Context, userCr
 	if err != nil {
 		return errors.Wrapf(err, "NewTask")
 	}
-	self.SetStatus(userCred, api.KUBE_CLUSTER_STATUS_CREATING, "")
+	self.SetStatus(ctx, userCred, api.KUBE_CLUSTER_STATUS_CREATING, "")
 	return task.ScheduleRun(nil)
 }
 
@@ -533,7 +535,7 @@ func (self *SKubeCluster) GetIKubeCluster(ctx context.Context) (cloudprovider.IC
 }
 
 func (self *SKubeCluster) Delete(ctx context.Context, userCred mcclient.TokenCredential) error {
-	self.SetStatus(userCred, apis.STATUS_DELETING, "")
+	self.SetStatus(ctx, userCred, apis.STATUS_DELETING, "")
 	return nil
 }
 

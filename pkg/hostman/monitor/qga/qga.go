@@ -20,29 +20,40 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
-	"unsafe"
 
+	"yunion.io/x/jsonutils"
 	"yunion.io/x/log"
 	"yunion.io/x/pkg/errors"
 
+	"yunion.io/x/onecloud/pkg/cloudcommon/types"
+	"yunion.io/x/onecloud/pkg/hostman/guestfs"
 	"yunion.io/x/onecloud/pkg/hostman/monitor"
 )
 
-const QGA_DEFAULT_READ_TIMEOUT_SECOND int = 5
+const (
+	QGA_DEFAULT_READ_TIMEOUT_SECOND int = 5
+	QGA_EXEC_DEFAULT_WAIT_TIMEOUT   int = 5
+)
+
+type QGACallback func([]byte)
 
 type QemuGuestAgent struct {
 	id            string
 	qgaSocketPath string
 
-	scanner     *bufio.Scanner
-	rwc         net.Conn
-	tm          *TryMutex
+	commandQueue  []string
+	callbackQueue []QGACallback
+
+	scanner *bufio.Scanner
+	rwc     net.Conn
+
 	mutex       *sync.Mutex
+	writing     bool
 	readTimeout int
 }
 
@@ -50,35 +61,18 @@ type TryMutex struct {
 	mu sync.Mutex
 }
 
-func (m *TryMutex) TryLock() bool {
-	return atomic.CompareAndSwapInt32((*int32)(unsafe.Pointer(&m.mu)), 0, 1)
-}
-
-func (m *TryMutex) Unlock() {
-	atomic.StoreInt32((*int32)(unsafe.Pointer(&m.mu)), 0)
-}
-
 func NewQemuGuestAgent(id, qgaSocketPath string) (*QemuGuestAgent, error) {
 	qga := &QemuGuestAgent{
 		id:            id,
 		qgaSocketPath: qgaSocketPath,
-		tm:            &TryMutex{},
 		mutex:         &sync.Mutex{},
-		readTimeout:   QGA_DEFAULT_READ_TIMEOUT_SECOND * 1000,
+		readTimeout:   QGA_DEFAULT_READ_TIMEOUT_SECOND,
 	}
 	err := qga.connect()
 	if err != nil {
 		return nil, err
 	}
 	return qga, nil
-}
-
-func (qga *QemuGuestAgent) SetTimeout(timeout int) {
-	qga.readTimeout = timeout
-}
-
-func (qga *QemuGuestAgent) ResetTimeout() {
-	qga.readTimeout = QGA_DEFAULT_READ_TIMEOUT_SECOND * 1000
 }
 
 func (qga *QemuGuestAgent) connect() error {
@@ -89,9 +83,49 @@ func (qga *QemuGuestAgent) connect() error {
 	if err != nil {
 		return errors.Wrap(err, "dial qga socket")
 	}
+
+	qga.commandQueue = make([]string, 0)
+	qga.callbackQueue = make([]QGACallback, 0)
 	qga.rwc = conn
 	qga.scanner = bufio.NewScanner(conn)
+
+	go qga.read()
 	return nil
+}
+
+func (qga *QemuGuestAgent) read() {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Errorf("QemuGuestAgent read %v %v", r, debug.Stack())
+		}
+	}()
+
+	scanner := qga.scanner
+	for scanner.Scan() {
+		res := scanner.Bytes()
+		if len(res) == 0 {
+			continue
+		}
+		go qga.callBack(res)
+	}
+	err := scanner.Err()
+	if err != nil {
+		log.Debugf("QGA Disconnected %s: %s", qga.id, err)
+	}
+}
+
+func (qga *QemuGuestAgent) callBack(res []byte) {
+	qga.mutex.Lock()
+	if len(qga.callbackQueue) == 0 {
+		qga.mutex.Unlock()
+		return
+	}
+	cb := qga.callbackQueue[0]
+	qga.callbackQueue = qga.callbackQueue[1:]
+	qga.mutex.Unlock()
+	if cb != nil {
+		go cb(res)
+	}
 }
 
 func (qga *QemuGuestAgent) Close() error {
@@ -106,16 +140,67 @@ func (qga *QemuGuestAgent) Close() error {
 		return err
 	}
 
+	qga.commandQueue = nil
+	qga.callbackQueue = nil
 	qga.scanner = nil
 	qga.rwc = nil
 	return nil
 }
 
-func (qga *QemuGuestAgent) write(cmd []byte) error {
-	log.Infof("QGA Write %s: %s", qga.id, string(cmd))
+func (qga *QemuGuestAgent) Query(cmd string, cb QGACallback) int {
+	// push
+	var cbQueueLength int
+	qga.mutex.Lock()
+	qga.commandQueue = append(qga.commandQueue, cmd)
+	qga.callbackQueue = append(qga.callbackQueue, cb)
+	cbQueueLength = len(qga.callbackQueue)
+	qga.mutex.Unlock()
+
+	if !qga.writing {
+		go qga.query()
+	}
+
+	return cbQueueLength
+}
+
+func (m *QemuGuestAgent) checkWriting() bool {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+	if m.writing {
+		return false
+	} else {
+		m.writing = true
+	}
+	return true
+}
+
+func (m *QemuGuestAgent) query() {
+	if !m.checkWriting() {
+		return
+	}
+	for {
+		if len(m.commandQueue) == 0 {
+			break
+		}
+		//pop
+		m.mutex.Lock()
+		cmd := m.commandQueue[0]
+		m.commandQueue = m.commandQueue[1:]
+		err := m.write(cmd)
+		m.mutex.Unlock()
+		if err != nil {
+			log.Errorf("Write %s to QGA error %s: %s", cmd, m.id, err)
+			break
+		}
+	}
+	m.writing = false
+}
+
+func (qga *QemuGuestAgent) write(cmd string) error {
+	log.Debugf("QGA Write %s: %s", qga.id, cmd)
 	length, index := len(cmd), 0
 	for index < length {
-		i, err := qga.rwc.Write(cmd)
+		i, err := qga.rwc.Write([]byte(cmd))
 		if err != nil {
 			return err
 		}
@@ -124,20 +209,14 @@ func (qga *QemuGuestAgent) write(cmd []byte) error {
 	return nil
 }
 
-// Lock before execute qemu guest agent commands
-func (qga *QemuGuestAgent) TryLock() bool {
-	return atomic.CompareAndSwapInt32((*int32)(unsafe.Pointer(&qga.tm.mu)), 0, 1)
-}
-
-// Unlock after execute qemu guest agent commands
-func (qga *QemuGuestAgent) Unlock() {
-	atomic.StoreInt32((*int32)(unsafe.Pointer(&qga.tm.mu)), 0)
-}
-
-func (qga *QemuGuestAgent) QgaCommand(cmd *monitor.Command) ([]byte, error) {
+func (qga *QemuGuestAgent) QgaCommand(cmd *monitor.Command, readTimeout int) ([]byte, error) {
 	info, err := qga.GuestInfo()
 	if err != nil {
 		return nil, err
+	}
+
+	if len(info.SupportedCommands) == 0 {
+		return nil, errors.Errorf("exec guest-info return empty")
 	}
 	var i = 0
 	for ; i < len(info.SupportedCommands); i++ {
@@ -151,19 +230,23 @@ func (qga *QemuGuestAgent) QgaCommand(cmd *monitor.Command) ([]byte, error) {
 	if !info.SupportedCommands[i].Enabled {
 		return nil, errors.Errorf("command %s not enabled", cmd.Execute)
 	}
-	res, err := qga.execCmd(cmd, info.SupportedCommands[i].SuccessResp, -1)
+	res, err := qga.execCmd(cmd, info.SupportedCommands[i].SuccessResp, readTimeout)
 	if err != nil {
 		return nil, err
 	}
 	return *res, nil
 }
 
-func (qga *QemuGuestAgent) execCmd(cmd *monitor.Command, expectResp bool, readTimeout int) (*json.RawMessage, error) {
-	if qga.TryLock() {
-		qga.Unlock()
-		return nil, errors.Errorf("qga exec cmd but not locked")
+func (qga *QemuGuestAgent) getQGACallback(expectResp bool, resChan chan string) QGACallback {
+	if !expectResp {
+		return nil
 	}
+	return func(res []byte) {
+		resChan <- string(res)
+	}
+}
 
+func (qga *QemuGuestAgent) execCmd(cmd *monitor.Command, expectResp bool, readTimeoutSecond int) (*json.RawMessage, error) {
 	if qga.rwc == nil {
 		err := qga.connect()
 		if err != nil {
@@ -171,36 +254,35 @@ func (qga *QemuGuestAgent) execCmd(cmd *monitor.Command, expectResp bool, readTi
 		}
 	}
 
-	rawCmd, err := json.Marshal(cmd)
-	if err != nil {
-		return nil, errors.Wrap(err, "marshal qga cmd")
-	}
+	var resChan = make(chan string)
+	var cb = qga.getQGACallback(expectResp, resChan)
 
-	err = qga.write(rawCmd)
-	if err != nil {
-		return nil, errors.Wrap(err, "write cmd")
-	}
+	rawCmd := jsonutils.Marshal(cmd).String()
+	cbQueueLength := qga.Query(rawCmd, cb)
 
 	if !expectResp {
 		return nil, nil
 	}
 
-	if readTimeout <= 0 {
-		readTimeout = qga.readTimeout
+	var res string
+	if readTimeoutSecond <= 0 {
+		readTimeoutSecond = qga.readTimeout
 	}
-	err = qga.rwc.SetReadDeadline(time.Now().Add(time.Duration(readTimeout) * time.Millisecond))
-	if err != nil {
-		return nil, errors.Wrap(err, "set read deadline")
+	select {
+	case <-time.After(time.Duration(readTimeoutSecond) * time.Second):
+		if cbQueueLength > 30 {
+			if err := qga.Close(); err != nil {
+				log.Errorf("failed close qga connection %s", err)
+			}
+		}
+		return nil, errors.Errorf("qga read timeout")
+	case res = <-resChan:
+		break
 	}
 
-	if !qga.scanner.Scan() {
-		defer qga.Close()
-		return nil, errors.Wrap(qga.scanner.Err(), "qga scanner")
-	}
 	var objmap map[string]*json.RawMessage
-	b := qga.scanner.Bytes()
-	log.Infof("qga response %s", b)
-	if err := json.Unmarshal(b, &objmap); err != nil {
+	log.Debugf("qga response %s", res)
+	if err := json.Unmarshal([]byte(res), &objmap); err != nil {
 		return nil, errors.Wrap(err, "unmarshal qga res")
 	}
 	if val, ok := objmap["return"]; ok {
@@ -320,13 +402,12 @@ func (qga *QemuGuestAgent) QgaGuestGetOsInfo() (*GuestOsInfo, error) {
 	return resOsInfo, nil
 }
 
-func (qga *QemuGuestAgent) QgaFileOpen(path string) (int, error) {
-	//file open
+func (qga *QemuGuestAgent) QgaFileOpen(path, mode string) (int, error) {
 	cmdFileOpen := &monitor.Command{
 		Execute: "guest-file-open",
 		Args: map[string]interface{}{
 			"path": path,
-			"mode": "w+",
+			"mode": mode,
 		},
 	}
 	rawResFileOpen, err := qga.execCmd(cmdFileOpen, true, -1)
@@ -340,7 +421,12 @@ func (qga *QemuGuestAgent) QgaFileOpen(path string) (int, error) {
 	return int(fileNum), nil
 }
 
-func (qga *QemuGuestAgent) QgaFileWrite(fileNum int, content string) error {
+type GuestFileWrite struct {
+	Count int  `json:"count"`
+	Eof   bool `json:"eof"`
+}
+
+func (qga *QemuGuestAgent) QgaFileWrite(fileNum int, content string) (int, bool, error) {
 	contentEncode := base64.StdEncoding.EncodeToString([]byte(content))
 	//write shell to file
 	cmdFileWrite := &monitor.Command{
@@ -350,11 +436,53 @@ func (qga *QemuGuestAgent) QgaFileWrite(fileNum int, content string) error {
 			"buf-b64": contentEncode,
 		},
 	}
-	_, err := qga.execCmd(cmdFileWrite, true, -1)
+	rawResFileWrite, err := qga.execCmd(cmdFileWrite, true, -1)
 	if err != nil {
-		return err
+		return -1, false, err
 	}
-	return nil
+	resWrite := new(GuestFileWrite)
+	err = json.Unmarshal(*rawResFileWrite, resWrite)
+	if err != nil {
+		return -1, false, errors.Wrap(err, "unmarshal raw response")
+	}
+
+	return resWrite.Count, resWrite.Eof, nil
+}
+
+type GuestFileRead struct {
+	Count  int    `json:"count"`
+	BufB64 string `json:"buf-b64"`
+	Eof    bool   `json:"eof"`
+}
+
+func (qga *QemuGuestAgent) QgaFileRead(fileNum, readCount int) ([]byte, bool, error) {
+	cmdFileRead := &monitor.Command{
+		Execute: "guest-file-read",
+	}
+	args := map[string]interface{}{
+		"handle": fileNum,
+	}
+	// readCount: maximum number of bytes to read (default is 4KB, maximum is 48MB)
+	if readCount > 0 {
+		args["count"] = readCount
+	}
+	cmdFileRead.Args = args
+
+	rawResFileRead, err := qga.execCmd(cmdFileRead, true, -1)
+	if err != nil {
+		return nil, false, err
+	}
+	resReadInfo := new(GuestFileRead)
+	err = json.Unmarshal(*rawResFileRead, resReadInfo)
+	if err != nil {
+		return nil, false, errors.Wrap(err, "unmarshal raw response")
+	}
+	content, err := base64.StdEncoding.DecodeString(resReadInfo.BufB64)
+	if err != nil {
+		return nil, false, errors.Wrap(err, "failed decode base64")
+	}
+
+	return content, resReadInfo.Eof, nil
 }
 
 func (qga *QemuGuestAgent) QgaFileClose(fileNum int) error {
@@ -446,13 +574,66 @@ func (qga *QemuGuestAgent) QgaSetWindowsNetwork(qgaNetMod *monitor.NetworkModify
 	return nil
 }
 
-func (qga *QemuGuestAgent) QgaSetLinuxNetwork(qgaNetMod *monitor.NetworkModify) error {
-	args := []string{"-c", fmt.Sprintf("/sbin/dhclient -r %s && /sbin/dhclient -1 %s", qgaNetMod.Device, qgaNetMod.Device)}
-	_, err := qga.GuestExecCommand("/bin/bash", args, []string{}, "", false)
-	return err
+var NETWORK_RESTRT_SCRIPT = `#!/bin/bash
+set -e
+DEV=$1
+
+if systemctl is-active --quiet NetworkManager.service; then
+	nmcli connection down $DEV && nmcli connection up $DEV
+	exit 0
+fi
+
+if command -v ifup &> /dev/null; then
+	ifdown $DEV && ifup $DEV
+	exit 0
+fi
+
+if command -v ifconfig &> /dev/null; then
+	ifconfig $DEV down && ifconfig $DEV up
+	exit 0
+fi
+
+if systemctl is-active --quiet network.service; then
+	systemctl restart network.service
+	exit 0
+fi
+
+if command -v ip &> /dev/null; then
+	ip link set $DEV down && ip link set $DEV up
+	exit 0
+fi
+
+echo "No valid method restart network device"
+exit 1
+`
+
+func (qga *QemuGuestAgent) QgaRestartLinuxNetwork(qgaNetMod *monitor.NetworkModify) error {
+	scriptPath := "/tmp/qga_restart_network"
+	if err := qga.FilePutContents(scriptPath, NETWORK_RESTRT_SCRIPT, false); err != nil {
+		return errors.Wrap(err, "write qga_restart_network script")
+	}
+
+	retCode, stdout, stderr, err := qga.CommandWithTimeout("bash", []string{scriptPath, qgaNetMod.Device}, nil, "", true, 10)
+	if err != nil {
+		return errors.Wrap(err, "CommandWithTimeout")
+	}
+	if retCode != 0 {
+		return errors.Errorf("QgaRestartLinuxNetwork failed: %s %s retcode %d", stdout, stderr, retCode)
+	}
+	return nil
 }
 
-func (qga *QemuGuestAgent) QgaSetNetwork(qgaNetMod *monitor.NetworkModify) error {
+func (qga *QemuGuestAgent) qgaDeployNetworkConfigure(guestNics []*types.SServerNic) error {
+	qgaPart := NewQGAPartition(qga)
+	fsDriver, err := guestfs.DetectRootFs(qgaPart)
+	if err != nil {
+		return errors.Wrap(err, "qga DetectRootFs")
+	}
+	log.Infof("QGA %s DetectRootFs %s", qga.id, fsDriver.String())
+	return fsDriver.DeployNetworkingScripts(qgaPart, guestNics)
+}
+
+func (qga *QemuGuestAgent) QgaSetNetwork(qgaNetMod *monitor.NetworkModify, guestNics []*types.SServerNic) error {
 	//Getting information about the operating system
 	resOsInfo, err := qga.QgaGuestGetOsInfo()
 	if err != nil {
@@ -464,7 +645,11 @@ func (qga *QemuGuestAgent) QgaSetNetwork(qgaNetMod *monitor.NetworkModify) error
 	case "mswindows":
 		return qga.QgaSetWindowsNetwork(qgaNetMod)
 	default:
-		return qga.QgaSetLinuxNetwork(qgaNetMod)
+		// do deploy network configure
+		if err := qga.qgaDeployNetworkConfigure(guestNics); err != nil {
+			return errors.Wrap(err, "qgaDeployNetworkConfigure")
+		}
+		return qga.QgaRestartLinuxNetwork(qgaNetMod)
 	}
 }
 

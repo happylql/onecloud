@@ -40,13 +40,17 @@ import (
 func InitHandlers(app *appsrv.Application) {
 	db.InitAllManagers()
 
+	taskman.InitArchivedTaskManager()
 	taskman.AddTaskHandler("v1", app)
+
 	db.AddScopeResourceCountHandler("", app)
 
 	for _, manager := range []db.IModelManager{
 		taskman.TaskManager,
 		taskman.SubTaskManager,
 		taskman.TaskObjectManager,
+		taskman.ArchivedTaskManager,
+
 		db.UserCacheManager,
 		db.TenantCacheManager,
 		db.SharedResourceManager,
@@ -62,9 +66,7 @@ func InitHandlers(app *appsrv.Application) {
 		proxy.ProxySettingManager,
 		models.ClouduserManager,
 		models.CloudgroupManager,
-		models.CloudgroupcacheManager,
 		models.CloudpolicyManager,
-		models.CloudpolicycacheManager,
 		models.SAMLProviderManager,
 		models.CloudroleManager,
 		models.SamluserManager,

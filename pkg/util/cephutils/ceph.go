@@ -20,6 +20,7 @@ import (
 	"io/ioutil"
 	"os"
 	"strings"
+	"time"
 
 	"yunion.io/x/cloudmux/pkg/cloudprovider"
 	"yunion.io/x/jsonutils"
@@ -156,6 +157,10 @@ func (cli *CephClient) CreateImage(name string, sizeMb int64) (*SImage, error) {
 	return image, cli.run("rbd", opts, false)
 }
 
+/*
+ * {"kb_used":193408,"bytes_used":198049792,"percent_used":0.32,"bytes_used2":0,"percent_used2":0.00,"osd_max_used":0,"osd_max_used_ratio":0.32,"max_avail":61003137024,"objects":1,"origin_bytes":0,"compress_bytes":0}
+ * {"stored":6198990973173,"objects":1734699,"kb_used":12132844593,"bytes_used":12424032862699,"percent_used":0.30800202488899231,"max_avail":13956734255104}
+ */
 func (cli *CephClient) GetCapacity() (*SCapacity, error) {
 	result := &SCapacity{}
 	opts := cli.options()
@@ -173,9 +178,13 @@ func (cli *CephClient) GetCapacity() (*SCapacity, error) {
 	result.UsedCapacitySizeKb = stats.Stats.TotalUsedBytes / 1024
 	for _, pool := range stats.Pools {
 		if pool.Name == cli.pool {
-			result.UsedCapacitySizeKb = int64(pool.Stats.Stored / 1024)
+			if pool.Stats.Stored > 0 {
+				result.UsedCapacitySizeKb = int64(pool.Stats.Stored / 1024)
+			} else {
+				result.UsedCapacitySizeKb = int64(pool.Stats.BytesUsed / 1024)
+			}
 			if pool.Stats.MaxAvail > 0 {
-				result.CapacitySizeKb = int64(pool.Stats.MaxAvail/1024 + int64(pool.Stats.Stored/1024))
+				result.CapacitySizeKb = int64(pool.Stats.MaxAvail/1024) + result.UsedCapacitySizeKb
 			}
 		}
 	}
@@ -221,7 +230,7 @@ func (cli *CephClient) SetTimeout(timeout int) {
 
 const DEFAULT_TIMTOUT_SECOND = 15
 
-func NewClient(monHost, key, pool string) (*CephClient, error) {
+func NewClient(monHost, key, pool string, enableMessengerV2 bool) (*CephClient, error) {
 	client := &CephClient{
 		monHost: monHost,
 		key:     key,
@@ -239,15 +248,23 @@ func NewClient(monHost, key, pool string) (*CephClient, error) {
 		}
 	}
 	monHosts := []string{}
-	for _, monHost := range strings.Split(client.monHost, ",") {
-		monHosts = append(monHosts, fmt.Sprintf(`[%s]`, monHost))
+	if enableMessengerV2 {
+		for _, monHost := range strings.Split(client.monHost, ",") {
+			monHosts = append(monHosts, fmt.Sprintf(`[v2:%s:3300/0,v1:%s:6789/0]`, monHost, monHost))
+		}
+	} else {
+		for _, monHost := range strings.Split(client.monHost, ",") {
+			monHosts = append(monHosts, fmt.Sprintf(`[%s]`, monHost))
+		}
 	}
+	client.monHost = strings.Join(monHosts, ",")
+
 	conf := fmt.Sprintf(`[global]
 mon host = %s
 rados mon op timeout = 5
 rados osd_op timeout = 1200
 client mount timeout = 120
-`, strings.Join(monHosts, ","))
+`, client.monHost)
 	if len(client.key) == 0 {
 		conf = fmt.Sprintf(`%s
 auth_cluster_required = none
@@ -320,9 +337,9 @@ type SImageInfo struct {
 	Features        []string      `json:"features"`
 	OpFeatures      []interface{} `json:"op_features"`
 	Flags           []interface{} `json:"flags"`
-	CreateTimestamp string        `json:"create_timestamp"`
-	AccessTimestamp string        `json:"access_timestamp"`
-	ModifyTimestamp string        `json:"modify_timestamp"`
+	CreateTimestamp time.Time     `json:"create_timestamp"`
+	AccessTimestamp time.Time     `json:"access_timestamp"`
+	ModifyTimestamp time.Time     `json:"modify_timestamp"`
 }
 
 func (img *SImage) options() []string {

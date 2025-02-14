@@ -174,7 +174,7 @@ func (self *SHuaweiClient) initSigner() error {
 }
 
 func (self *SHuaweiClient) newRegionAPIClient(regionId string) (*client.Client, error) {
-	cli, err := client.NewClientWithAccessKey(regionId, self.ownerId, self.projectId, self.accessKey, self.accessSecret, self.debug, self.cpcfg.DefaultRegion, self.endpoints)
+	cli, err := client.NewClientWithAccessKey(regionId, self.ownerId, self.projectId, self.accessKey, self.accessSecret, self.debug, self.cpcfg.RegionId, self.endpoints)
 	if err != nil {
 		return nil, err
 	}
@@ -196,7 +196,7 @@ func (self *SHuaweiClient) newRegionAPIClient(regionId string) (*client.Client, 
 }
 
 func (self *SHuaweiClient) newGeneralAPIClient() (*client.Client, error) {
-	cli, err := client.NewClientWithAccessKey(self.cpcfg.DefaultRegion, self.ownerId, "", self.accessKey, self.accessSecret, self.debug, self.cpcfg.DefaultRegion, self.endpoints)
+	cli, err := client.NewClientWithAccessKey(self.cpcfg.RegionId, self.ownerId, "", self.accessKey, self.accessSecret, self.debug, self.cpcfg.RegionId, self.endpoints)
 	if err != nil {
 		return nil, err
 	}
@@ -291,12 +291,12 @@ func getOBSEndpoint(regionId string) string {
 }
 
 func (client *SHuaweiClient) getOBSClient(regionId string) (*obs.ObsClient, error) {
-	endpoint := client.endpoints.GetEndpoint(client.cpcfg.DefaultRegion, "obs", regionId)
+	endpoint := client.endpoints.GetEndpoint(client.cpcfg.RegionId, "obs", regionId)
 	return obs.New(client.accessKey, client.accessSecret, endpoint)
 }
 
 func (self *SHuaweiClient) fetchBuckets() error {
-	obscli, err := self.getOBSClient(self.cpcfg.DefaultRegion)
+	obscli, err := self.getOBSClient(self.cpcfg.RegionId)
 	if err != nil {
 		return errors.Wrap(err, "getOBSClient")
 	}
@@ -329,11 +329,7 @@ func (self *SHuaweiClient) fetchBuckets() error {
 }
 
 func (self *SHuaweiClient) GetCloudRegionExternalIdPrefix() string {
-	if len(self.projectId) > 0 {
-		return self.iregions[0].GetGlobalId()
-	} else {
-		return CLOUD_PROVIDER_HUAWEI
-	}
+	return CLOUD_PROVIDER_HUAWEI
 }
 
 func (self *SHuaweiClient) UpdateAccount(accessKey, secret string) error {
@@ -371,6 +367,7 @@ func (self *SHuaweiClient) GetSubAccounts() ([]cloudprovider.SSubAccount, error)
 		}
 
 		s := cloudprovider.SSubAccount{
+			Id:           project.ID,
 			Name:         fmt.Sprintf("%s-%s", self.cpcfg.Name, project.Name),
 			Account:      fmt.Sprintf("%s/%s", self.accessKey, project.ID),
 			HealthStatus: project.GetHealthStatus(),
@@ -391,8 +388,8 @@ func (client *SHuaweiClient) GetIamLoginUrl() string {
 	return fmt.Sprintf("https://auth.huaweicloud.com/authui/login.html?account=%s#/login", client.ownerName)
 }
 
-func (self *SHuaweiClient) GetIRegions() []cloudprovider.ICloudRegion {
-	return self.iregions
+func (self *SHuaweiClient) GetIRegions() ([]cloudprovider.ICloudRegion, error) {
+	return self.iregions, nil
 }
 
 func (self *SHuaweiClient) getIRegionByRegionId(id string) (cloudprovider.ICloudRegion, error) {
@@ -416,7 +413,7 @@ func (self *SHuaweiClient) GetIRegionById(id string) (cloudprovider.ICloudRegion
 
 func (self *SHuaweiClient) GetRegion(regionId string) *SRegion {
 	if len(regionId) == 0 {
-		regionId = self.cpcfg.DefaultRegion
+		regionId = self.cpcfg.RegionId
 	}
 
 	for i := 0; i < len(self.iregions); i += 1 {
@@ -504,7 +501,6 @@ func (self *SHuaweiClient) GetCapabilities() []string {
 		cloudprovider.CLOUD_CAPABILITY_CACHE,
 		cloudprovider.CLOUD_CAPABILITY_EVENT,
 		cloudprovider.CLOUD_CAPABILITY_CLOUDID,
-		cloudprovider.CLOUD_CAPABILITY_SAML_AUTH,
 		cloudprovider.CLOUD_CAPABILITY_NAT,
 		cloudprovider.CLOUD_CAPABILITY_NAS,
 		cloudprovider.CLOUD_CAPABILITY_MODELARTES,

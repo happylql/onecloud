@@ -45,6 +45,7 @@ func init() {
 		),
 	}
 	TokenCacheManager.SetVirtualObject(TokenCacheManager)
+	TokenCacheManager.TableSpec().AddIndex(false, "deleted", "valid")
 }
 
 type STokenCache struct {
@@ -144,6 +145,7 @@ func (manager *STokenCacheManager) insert(ctx context.Context, token string, exp
 		Source:    source,
 		Ip:        ip,
 	}
+	val.SetModelManager(manager, &val)
 	err := manager.TableSpec().InsertOrUpdate(ctx, &val)
 	return errors.Wrap(err, "InsertOrUpdate")
 }
@@ -157,7 +159,7 @@ func (manager *STokenCacheManager) FetchToken(tokenStr string) (*STokenCache, er
 }
 
 func (manager *STokenCacheManager) removeObsolete() error {
-	sql := fmt.Sprintf("DELETE FROM `%s` WHERE `expired_at` < ?", manager.TableSpec().Name())
+	sql := fmt.Sprintf("DELETE FROM %s WHERE expired_at < ?", manager.TableSpec().Name())
 	db := sqlchemy.GetDBWithName(manager.TableSpec().GetDBName())
 	now := timeutils.UtcNow()
 	_, err := db.Exec(sql, now.Add(-24*time.Hour))

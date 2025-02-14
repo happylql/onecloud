@@ -15,15 +15,16 @@
 package hostdhcp
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"strings"
 	"time"
 
 	"yunion.io/x/log"
-	"yunion.io/x/pkg/errors"
 	"yunion.io/x/pkg/util/netutils"
 
+	"yunion.io/x/onecloud/pkg/apis"
 	"yunion.io/x/onecloud/pkg/cloudcommon/types"
 	"yunion.io/x/onecloud/pkg/hostman/guestman/desc"
 	guestman "yunion.io/x/onecloud/pkg/hostman/guestman/types"
@@ -99,7 +100,9 @@ func gusetnetworkJsonDescToServerNic(nicdesc *types.SServerNic, guestNic *desc.S
 
 	nicdesc.Index = int(guestNic.Index)
 	nicdesc.Bridge = guestNic.Bridge
-	nicdesc.Domain = guestNic.Domain
+	if !apis.IsIllegalSearchDomain(guestNic.Domain) {
+		nicdesc.Domain = guestNic.Domain
+	}
 	nicdesc.Ip = guestNic.Ip
 	nicdesc.Vlan = guestNic.Vlan
 	nicdesc.Driver = guestNic.Driver
@@ -121,47 +124,23 @@ func gusetnetworkJsonDescToServerNic(nicdesc *types.SServerNic, guestNic *desc.S
 	nicdesc.NicType = guestNic.NicType
 	nicdesc.LinkUp = guestNic.LinkUp
 	nicdesc.TeamWith = guestNic.TeamWith
+
+	nicdesc.IsDefault = guestNic.IsDefault
+
+	nicdesc.Ip6 = guestNic.Ip6
+	nicdesc.Masklen6 = int(guestNic.Masklen6)
+	nicdesc.Gateway6 = guestNic.Gateway6
+
 	return nil
 }
 
-func GetMainNic(nics []*desc.SGuestNetwork) (*desc.SGuestNetwork, error) {
-	var mainIp netutils.IPV4Addr
-	var mainNic *desc.SGuestNetwork
+func GetMainNic(nics []*desc.SGuestNetwork) *desc.SGuestNetwork {
 	for _, n := range nics {
-		if n.Gateway != "" {
-			ipInt, err := netutils.NewIPV4Addr(n.Ip)
-			if err != nil {
-				return nil, err
-			}
-			if mainIp == 0 {
-				mainIp = ipInt
-				mainNic = n
-			} else if !netutils.IsPrivate(ipInt) && netutils.IsPrivate(mainIp) {
-				mainIp = ipInt
-				mainNic = n
-			}
+		if n.IsDefault {
+			return n
 		}
 	}
-	if mainNic != nil {
-		return mainNic, nil
-	}
-	for _, n := range nics {
-		ipInt, err := netutils.NewIPV4Addr(n.Ip)
-		if err != nil {
-			return nil, errors.Wrapf(err, "netutils.NewIPV4Addr %s", n.Ip)
-		}
-		if mainIp == 0 {
-			mainIp = ipInt
-			mainNic = n
-		} else if !netutils.IsPrivate(ipInt) && netutils.IsPrivate(mainIp) {
-			mainIp = ipInt
-			mainNic = n
-		}
-	}
-	if mainNic != nil {
-		return mainNic, nil
-	}
-	return nil, errors.Wrap(errors.ErrInvalidStatus, "no valid nic")
+	return nil
 }
 
 func (s *SGuestDHCPServer) getGuestConfig(
@@ -192,15 +171,14 @@ func (s *SGuestDHCPServer) getGuestConfig(
 
 	// get main ip
 	guestNics := guestDesc.Nics
-	manNic, err := GetMainNic(guestNics)
-	if err != nil {
-		log.Errorln(err)
-		return nil
+	manNic := GetMainNic(guestNics)
+	var mainIp string
+	if manNic != nil {
+		mainIp = manNic.Ip
 	}
-	mainIp := manNic.Ip
 
 	var route = [][]string{}
-	if len(nicdesc.Gateway) > 0 && mainIp == nicIp {
+	if nicdesc.IsDefault {
 		conf.Gateway = net.ParseIP(nicdesc.Gateway)
 
 		osName := guestDesc.OsName
@@ -210,10 +188,9 @@ func (s *SGuestDHCPServer) getGuestConfig(
 		if !strings.HasPrefix(strings.ToLower(osName), "win") {
 			route = append(route, []string{"0.0.0.0/0", nicdesc.Gateway})
 		}
-		route = append(route, []string{"169.254.169.254/32", nicdesc.Gateway})
+		route = append(route, []string{"169.254.169.254/32", "0.0.0.0"})
 	}
-	netutils2.AddNicRoutes(
-		&route, nicdesc, mainIp, len(guestNics), options.HostOptions.PrivatePrefixes)
+	route = netutils2.AddNicRoutes(route, nicdesc, mainIp, len(guestNics))
 	conf.Routes = route
 
 	if len(nicdesc.Dns) > 0 {
@@ -264,7 +241,7 @@ func (s *SGuestDHCPServer) IsDhcpPacket(pkt dhcp.Packet) bool {
 	return pkt != nil && (pkt.Type() == dhcp.Request || pkt.Type() == dhcp.Discover)
 }
 
-func (s *SGuestDHCPServer) ServeDHCP(pkt dhcp.Packet, addr *net.UDPAddr, intf *net.Interface) (dhcp.Packet, []string, error) {
+func (s *SGuestDHCPServer) ServeDHCP(ctx context.Context, pkt dhcp.Packet, addr *net.UDPAddr, intf *net.Interface) (dhcp.Packet, []string, error) {
 	pkg, err := s.serveDHCPInternal(pkt, addr, intf)
 	return pkg, nil, err
 }

@@ -20,6 +20,7 @@ import (
 
 	"yunion.io/x/jsonutils"
 	"yunion.io/x/log"
+	"yunion.io/x/pkg/errors"
 	"yunion.io/x/pkg/util/httputils"
 	"yunion.io/x/pkg/utils"
 
@@ -46,6 +47,13 @@ func (task *GuestConvertEsxiToKvmTask) OnInit(ctx context.Context, obj db.IStand
 func (task *GuestConvertEsxiToKvmTask) GetSchedParams() (*schedapi.ScheduleInput, error) {
 	obj := task.GetObject()
 	guest := obj.(*models.SGuest)
+
+	input := new(api.ServerCreateInput)
+	err := task.Params.Unmarshal(input, "input")
+	if err != nil {
+		return nil, errors.Wrap(err, "failed unmarshal create input")
+	}
+
 	schedDesc := guest.ToSchedDesc()
 	if task.Params.Contains("prefer_host_id") {
 		preferHostId, _ := task.Params.GetString("prefer_host_id")
@@ -56,13 +64,15 @@ func (task *GuestConvertEsxiToKvmTask) GetSchedParams() (*schedapi.ScheduleInput
 		schedDesc.Disks[i].Medium = ""
 		schedDesc.Disks[i].Storage = ""
 	}
+
+	schedDesc.Networks = input.Networks
 	schedDesc.Hypervisor = api.HYPERVISOR_KVM
 	return schedDesc, nil
 }
 
 func (task *GuestConvertEsxiToKvmTask) OnStartSchedule(obj IScheduleModel) {
 	guest := obj.(*models.SGuest)
-	guest.SetStatus(task.UserCred, api.VM_CONVERTING, "")
+	guest.SetStatus(context.Background(), task.UserCred, api.VM_CONVERTING, "")
 	db.OpsLog.LogEvent(guest, db.ACT_VM_CONVERTING, "", task.UserCred)
 }
 
@@ -72,9 +82,9 @@ func (task *GuestConvertEsxiToKvmTask) OnScheduleFailed(ctx context.Context, rea
 }
 
 func (task *GuestConvertEsxiToKvmTask) taskFailed(ctx context.Context, guest *models.SGuest, reason jsonutils.JSONObject) {
-	guest.SetStatus(task.UserCred, api.VM_CONVERT_FAILED, reason.String())
+	guest.SetStatus(ctx, task.UserCred, api.VM_CONVERT_FAILED, reason.String())
 	targetGuest := task.getTargetGuest()
-	targetGuest.SetStatus(task.UserCred, api.VM_CONVERT_FAILED, reason.String())
+	targetGuest.SetStatus(ctx, task.UserCred, api.VM_CONVERT_FAILED, reason.String())
 	db.OpsLog.LogEvent(guest, db.ACT_VM_CONVERT_FAIL, reason, task.UserCred)
 	logclient.AddSimpleActionLog(guest, logclient.ACT_VM_CONVERT, reason, task.UserCred, false)
 	logclient.AddSimpleActionLog(targetGuest, logclient.ACT_VM_CONVERT, reason, task.UserCred, false)
@@ -127,6 +137,30 @@ func (task *GuestConvertEsxiToKvmTask) SaveScheduleResult(ctx context.Context, o
 	if err != nil {
 		log.Errorf("fail to unmarshal params input")
 		input = guest.ToCreateInput(ctx, task.UserCred)
+	}
+
+	err = task.Params.Unmarshal(input, "input")
+	if err != nil {
+		log.Errorf("fail to unmarshal params input")
+		task.taskFailed(ctx, guest, jsonutils.NewString(fmt.Sprintf("umarshal create input %s", err)))
+		return
+	}
+
+	err = targetGuest.CreateNetworksOnHost(ctx, task.UserCred, host, input.Networks, nil, nil, target.Nets)
+	if err != nil {
+		task.taskFailed(ctx, guest, jsonutils.NewString(fmt.Sprintf("guest create networks %s", err)))
+		return
+	}
+	gns, _ := targetGuest.GetNetworks("")
+	for i := range gns {
+		_, err := db.Update(&gns[i], func() error {
+			gns[i].MacAddr = input.Networks[i].Mac
+			return nil
+		})
+		if err != nil {
+			task.taskFailed(ctx, guest, jsonutils.NewString(fmt.Sprintf("update guest networks macaddr %s", err)))
+			return
+		}
 	}
 
 	//pendingUsage.Storage = guest.GetDisksSize()
@@ -185,11 +219,21 @@ func (task *GuestConvertEsxiToKvmTask) OnHostCreateGuest(
 		}
 		db.OpsLog.LogEvent(disk, db.ACT_ALLOCATE, disk.GetShortDesc(ctx), task.UserCred)
 	}
-	if err := guest.ConvertEsxiNetworks(targetGuest); err != nil {
-		task.taskFailed(ctx, guest, jsonutils.NewString(err.Error()))
+	task.SetStage("OnGuestConvertDoDeployGuest", nil)
+
+	input := new(api.ServerCreateInput)
+	err := task.Params.Unmarshal(input, "input")
+	if err != nil {
+		task.taskFailed(ctx, guest, jsonutils.NewString(fmt.Sprintf("failed unmarshal input: %s", err)))
 		return
 	}
-	task.TaskComplete(ctx, guest, targetGuest)
+
+	deployParams := jsonutils.NewDict()
+	deployParams.Set("reset_password", jsonutils.JSONFalse)
+	if jsonutils.QueryBoolean(task.Params, "deploy_telegraf", false) {
+		deployParams.Set("deploy_telegraf", jsonutils.JSONTrue)
+	}
+	targetGuest.StartGuestDeployTask(ctx, task.UserCred, deployParams, "deploy", task.GetTaskId())
 }
 
 func (task *GuestConvertEsxiToKvmTask) OnHostCreateGuestFailed(
@@ -198,9 +242,18 @@ func (task *GuestConvertEsxiToKvmTask) OnHostCreateGuestFailed(
 	task.taskFailed(ctx, guest, data)
 }
 
+func (task *GuestConvertEsxiToKvmTask) OnGuestConvertDoDeployGuest(ctx context.Context, guest *models.SGuest, data jsonutils.JSONObject) {
+	targetGuest := task.getTargetGuest()
+	task.TaskComplete(ctx, guest, targetGuest)
+}
+
+func (task *GuestConvertEsxiToKvmTask) OnGuestConvertDoDeployGuestFailed(ctx context.Context, guest *models.SGuest, data jsonutils.JSONObject) {
+	task.taskFailed(ctx, guest, data)
+}
+
 func (task *GuestConvertEsxiToKvmTask) TaskComplete(ctx context.Context, guest, targetGuest *models.SGuest) {
 	guest.SetMetadata(ctx, api.SERVER_META_CONVERTED_SERVER, targetGuest.Id, task.UserCred)
-	guest.SetStatus(task.UserCred, api.VM_CONVERTED, "")
+	guest.SetStatus(ctx, task.UserCred, api.VM_CONVERTED, "")
 	if osProfile := guest.GetMetadata(ctx, "__os_profile__", task.UserCred); len(osProfile) > 0 {
 		targetGuest.SetMetadata(ctx, "__os_profile__", osProfile, task.UserCred)
 	}

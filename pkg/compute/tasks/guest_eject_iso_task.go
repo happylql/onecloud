@@ -23,6 +23,7 @@ import (
 	"yunion.io/x/onecloud/pkg/cloudcommon/db"
 	"yunion.io/x/onecloud/pkg/cloudcommon/db/taskman"
 	"yunion.io/x/onecloud/pkg/compute/models"
+	"yunion.io/x/onecloud/pkg/util/logclient"
 )
 
 type GuestEjectISOTask struct {
@@ -42,12 +43,23 @@ func (self *GuestEjectISOTask) startEjectIso(ctx context.Context, obj db.IStanda
 	cdromOrdinal, _ := self.Params.Int("cdrom_ordinal")
 	if guest.EjectIso(cdromOrdinal, self.UserCred) && guest.Status == api.VM_RUNNING {
 		self.SetStage("OnConfigSyncComplete", nil)
-		guest.GetDriver().RequestGuestHotRemoveIso(ctx, guest, self)
+		drv, err := guest.GetDriver()
+		if err != nil {
+			self.SetStageFailed(ctx, jsonutils.NewString(err.Error()))
+			return
+		}
+		drv.RequestGuestHotRemoveIso(ctx, guest, self)
 	} else {
 		self.SetStageComplete(ctx, nil)
 	}
 }
 
 func (self *GuestEjectISOTask) OnConfigSyncComplete(ctx context.Context, obj db.IStandaloneModel, data jsonutils.JSONObject) {
+	logclient.AddActionLogWithContext(ctx, obj, logclient.ACT_ISO_DETACH, nil, self.UserCred, true)
 	self.SetStageComplete(ctx, nil)
+}
+
+func (self *GuestEjectISOTask) OnConfigSyncCompleteFailed(ctx context.Context, obj db.IStandaloneModel, data jsonutils.JSONObject) {
+	logclient.AddActionLogWithContext(ctx, obj, logclient.ACT_ISO_DETACH, nil, self.UserCred, false)
+	self.SetStageFailed(ctx, nil)
 }

@@ -21,6 +21,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"time"
 	"unicode"
 
 	"yunion.io/x/log"
@@ -130,48 +131,61 @@ func Netlen2Mask(netmasklen int) string {
 	return netutils.Netlen2Mask(netmasklen)
 }
 
-func addRoute(routes *[][]string, net, gw string) {
-	for _, rt := range *routes {
+func addRoute(routes [][]string, net, gw string) [][]string {
+	for _, rt := range routes {
 		if rt[0] == net {
-			return
+			return routes
 		}
 	}
-	*routes = append(*routes, []string{net, gw})
+	return append(routes, []string{net, gw})
 }
 
-func extendRoutes(routes *[][]string, nicRoutes []types.SRoute) error {
+func extendRoutes(routes [][]string, nicRoutes []types.SRoute) [][]string {
 	for i := 0; i < len(nicRoutes); i++ {
-		addRoute(routes, nicRoutes[i][0], nicRoutes[i][1])
+		routes = addRoute(routes, nicRoutes[i][0], nicRoutes[i][1])
 	}
-	return nil
+	return routes
 }
 
 func isExitAddress(ip string) bool {
 	ipv4, err := netutils.NewIPV4Addr(ip)
 	if err != nil {
+		log.Errorf("NewIPV4Addr %s fail %s", ip, err)
 		return false
 	}
-	return !netutils.IsPrivate(ipv4) || netutils.IsHostLocal(ipv4) || netutils.IsLinkLocal(ipv4)
+	return netutils.IsExitAddress(ipv4)
 }
 
-func AddNicRoutes(routes *[][]string, nicDesc *types.SServerNic, mainIp string, nicCnt int, privatePrefixes []string) {
-	if mainIp == nicDesc.Ip {
-		return
-	}
+func AddNicRoutes(routes [][]string, nicDesc *types.SServerNic, mainIp string, nicCnt int) [][]string {
+	// always add static routes, even if this is the default NIC
+	// if mainIp == nicDesc.Ip {
+	// 	return routes
+	// }
 	if len(nicDesc.Routes) > 0 {
-		extendRoutes(routes, nicDesc.Routes)
+		routes = extendRoutes(routes, nicDesc.Routes)
 	} else if len(nicDesc.Gateway) > 0 && !isExitAddress(nicDesc.Ip) &&
 		nicCnt == 2 && nicDesc.Ip != mainIp && isExitAddress(mainIp) {
-		for _, pref := range GetPrivatePrefixes(privatePrefixes) {
-			addRoute(routes, pref, nicDesc.Gateway)
+		for _, pref := range netutils.GetPrivateIPRanges() {
+			prefs := pref.ToPrefixes()
+			for _, p := range prefs {
+				routes = addRoute(routes, p.String(), nicDesc.Gateway)
+			}
 		}
 	}
+
+	if nicDesc.Ip == mainIp {
+		// always add 169.254.169.254 for default NIC
+		routes = addRoute(routes, "169.254.169.254/32", "0.0.0.0")
+	}
+	return routes
 }
 
 func GetNicDns(nicdesc *types.SServerNic) []string {
 	dnslist := []string{}
 	if len(nicdesc.Dns) > 0 {
-		dnslist = append(dnslist, nicdesc.Dns)
+		for _, dns := range strings.Split(nicdesc.Dns, ",") {
+			dnslist = append(dnslist, dns)
+		}
 	}
 	return dnslist
 }
@@ -434,4 +448,32 @@ func PrefixSplit(pref string) (string, int, error) {
 	} else {
 		return pref, 32, nil
 	}
+}
+
+func TestTcpPort(ip string, port int, timeoutSecs int, tries int) error {
+	if timeoutSecs <= 0 {
+		timeoutSecs = 3
+	}
+	if tries <= 0 {
+		tries = 3
+	}
+
+	address := net.JoinHostPort(ip, fmt.Sprintf("%d", port))
+	// 3 second timeout
+	errs := make([]error, 0)
+	for i := 0; i < tries; i++ {
+		conn, err := net.DialTimeout("tcp", address, time.Duration(timeoutSecs)*time.Second)
+		if err != nil {
+			errs = append(errs, err)
+		} else {
+			if conn != nil {
+				_ = conn.Close()
+				return nil
+			} else {
+				errs = append(errs, errors.Wrap(errors.ErrEmpty, "nil conn"))
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return errors.NewAggregate(errs)
 }

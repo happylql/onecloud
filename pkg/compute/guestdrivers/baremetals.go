@@ -175,8 +175,8 @@ func (self *SBaremetalGuestDriver) GetNamedNetworkConfiguration(guest *models.SG
 	return net, nil, "", false, nil
 }
 
-func (self *SBaremetalGuestDriver) GetRandomNetworkTypes() []string {
-	return []string{api.NETWORK_TYPE_BAREMETAL, api.NETWORK_TYPE_GUEST}
+func (self *SBaremetalGuestDriver) GetRandomNetworkTypes() []api.TNetworkType {
+	return []api.TNetworkType{api.NETWORK_TYPE_BAREMETAL, api.NETWORK_TYPE_GUEST}
 }
 
 func (self *SBaremetalGuestDriver) Attach2RandomNetwork(guest *models.SGuest, ctx context.Context, userCred mcclient.TokenCredential, host *models.SHost, netConfig *api.NetworkConfig, pendingUsage quotas.IQuota) ([]models.SGuestnetwork, error) {
@@ -184,9 +184,14 @@ func (self *SBaremetalGuestDriver) Attach2RandomNetwork(guest *models.SGuest, ct
 	netsAvaiable := make([]models.SNetwork, 0)
 	netifIndexs := make(map[string][]models.SNetInterface, 0)
 
-	netTypes := guest.GetDriver().GetRandomNetworkTypes()
+	drv, err := guest.GetDriver()
+	if err != nil {
+		return nil, err
+	}
+
+	netTypes := drv.GetRandomNetworkTypes()
 	if len(netConfig.NetType) > 0 {
-		netTypes = []string{netConfig.NetType}
+		netTypes = []api.TNetworkType{api.TNetworkType(netConfig.NetType)}
 	}
 	var wirePattern *regexp.Regexp
 	if len(netConfig.Wire) > 0 {
@@ -205,9 +210,9 @@ func (self *SBaremetalGuestDriver) Attach2RandomNetwork(guest *models.SGuest, ct
 		}
 		var net *models.SNetwork
 		if netConfig.Private {
-			net, _ = wire.GetCandidatePrivateNetwork(userCred, userCred, models.NetworkManager.AllowScope(userCred), netConfig.Exit, netTypes)
+			net, _ = wire.GetCandidatePrivateNetwork(ctx, userCred, userCred, models.NetworkManager.AllowScope(userCred), netConfig.Exit, netTypes)
 		} else {
-			net, _ = wire.GetCandidateAutoAllocNetwork(userCred, userCred, models.NetworkManager.AllowScope(userCred), netConfig.Exit, netTypes)
+			net, _ = wire.GetCandidateAutoAllocNetwork(ctx, userCred, userCred, models.NetworkManager.AllowScope(userCred), netConfig.Exit, netTypes)
 		}
 		if net != nil {
 			netsAvaiable = append(netsAvaiable, *net)
@@ -262,6 +267,8 @@ func (self *SBaremetalGuestDriver) Attach2RandomNetwork(guest *models.SGuest, ct
 			RequireDesignatedIP: false,
 			UseDesignatedIP:     reuseAddr,
 			NicConfs:            nicConfs,
+
+			IsDefault: netConfig.IsDefault,
 		})
 	}
 	return nil, fmt.Errorf("No appropriate host virtual network...")
@@ -356,7 +363,7 @@ func (self *SBaremetalGuestDriver) RequestStopGuestForDelete(ctx context.Context
 		!guest.PendingDeleted &&
 		!overridePendingDelete &&
 		!purge {
-		return guest.StartGuestStopTask(ctx, task.GetUserCred(), true, false, task.GetTaskId())
+		return guest.StartGuestStopTask(ctx, task.GetUserCred(), 0, true, false, task.GetTaskId())
 	}
 	if host != nil && !host.GetEnabled() && !purge {
 		return errors.Errorf("fail to contact baremetal")
@@ -410,6 +417,11 @@ func (self *SBaremetalGuestDriver) ValidateCreateData(ctx context.Context, userC
 			return nil, httperrors.NewInputParameterError("Invalid raid config: %v", err)
 		}
 	}
+	if input.BaremetalRootDiskMatcher != nil {
+		if err := baremetal.ValidateRootDiskMatcher(input.BaremetalRootDiskMatcher); err != nil {
+			return nil, httperrors.NewInputParameterError("Invalid root disk matcher: %v", err)
+		}
+	}
 	//if len(input.Disks) <= 0 {
 	//	return nil, httperrors.NewInputParameterError("Root disk must be present")
 	//}
@@ -459,7 +471,7 @@ func (self *SBaremetalGuestDriver) RequestRebuildRootDisk(ctx context.Context, g
 	return nil
 }
 
-func (self *SBaremetalGuestDriver) PerformStart(ctx context.Context, userCred mcclient.TokenCredential, guest *models.SGuest, data *jsonutils.JSONDict) error {
+func (self *SBaremetalGuestDriver) PerformStart(ctx context.Context, userCred mcclient.TokenCredential, guest *models.SGuest, data *jsonutils.JSONDict, parentTaskId string) error {
 	return guest.StartGueststartTask(ctx, userCred, data, "")
 }
 

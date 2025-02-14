@@ -39,7 +39,7 @@ import (
 type IScheduleModel interface {
 	db.IStandaloneModel
 
-	SetStatus(userCred mcclient.TokenCredential, status string, reason string) error
+	SetStatus(ctx context.Context, userCred mcclient.TokenCredential, status string, reason string) error
 }
 
 type IScheduleTask interface {
@@ -64,11 +64,11 @@ type SSchedTask struct {
 
 func (self *SSchedTask) OnStartSchedule(obj IScheduleModel) {
 	db.OpsLog.LogEvent(obj, db.ACT_ALLOCATING, nil, self.GetUserCred())
-	obj.SetStatus(self.GetUserCred(), api.VM_SCHEDULE, "")
+	obj.SetStatus(context.Background(), self.GetUserCred(), api.VM_SCHEDULE, "")
 }
 
 func (self *SSchedTask) OnScheduleFailCallback(ctx context.Context, obj IScheduleModel, reason jsonutils.JSONObject, index int) {
-	obj.SetStatus(self.GetUserCred(), api.VM_SCHEDULE_FAILED, reason.String())
+	obj.SetStatus(ctx, self.GetUserCred(), api.VM_SCHEDULE_FAILED, reason.String())
 	db.OpsLog.LogEvent(obj, db.ACT_ALLOCATE_FAIL, reason, self.GetUserCred())
 	logclient.AddActionLogWithStartable(self, obj, logclient.ACT_ALLOCATE, reason, self.GetUserCred(), false)
 	notifyclient.NotifySystemErrorWithCtx(ctx, obj.GetId(), obj.GetName(), api.VM_SCHEDULE_FAILED, reason.String())
@@ -141,6 +141,12 @@ func doScheduleObjects(
 		return
 	}
 
+	sort.Sort(sortedIScheduleModelList(objs))
+	schedInput.GuestIds = make([]string, len(objs))
+	for i := range objs {
+		schedInput.GuestIds[i] = objs[i].GetId()
+	}
+
 	output, err := doScheduleWithInput(ctx, task, schedInput, len(objs))
 	if err != nil {
 		onSchedulerRequestFail(ctx, task, objs, jsonutils.NewString(err.Error()))
@@ -202,7 +208,6 @@ func onSchedulerResults(
 		task.SaveScheduleResult(ctx, nil, results[0], 0)
 		return
 	}
-	sort.Sort(sortedIScheduleModelList(objs))
 	succCount := 0
 	for idx := 0; idx < len(objs); idx += 1 {
 		obj := objs[idx]

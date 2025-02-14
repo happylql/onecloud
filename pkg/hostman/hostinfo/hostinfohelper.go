@@ -288,7 +288,11 @@ func NewNIC(desc string) (*SNIC, error) {
 		}
 		time.Sleep(time.Second * 1)
 	} else {
-		log.Infof("Confirm to configuration!!")
+		log.Infof("Confirm to configuration!! To migrate physical interface configs")
+		err := nic.BridgeDev.MigrateSlaveConfigs(nic.BridgeDev)
+		if err != nil {
+			log.Errorf("fail to migrate configs: %s", err)
+		}
 	}
 	if err := nic.BridgeDev.PersistentConfig(); err != nil {
 		return nil, errors.Wrapf(err, "nic.BridgeDev.PersistentConfig %v", nic.BridgeDev)
@@ -321,15 +325,18 @@ type SSysInfo struct {
 	KernelVersion  string `json:"kernel_version"`
 	QemuVersion    string `json:"qemu_version"`
 	OvsVersion     string `json:"ovs_version"`
+	OvsKmodVersion string `json:"ovs_kmod_version"`
 	KvmModule      string `json:"kvm_module"`
 	CpuModelName   string `json:"cpu_model_name"`
 	CpuMicrocode   string `json:"cpu_microcode"`
 
 	StorageType string `json:"storage_type"`
 
-	HugepagesOption string `json:"hugepages_option"`
-	HugepageSizeKb  int    `json:"hugepage_size_kb"`
-	HugepageNr      *int   `json:"hugepage_nr"`
+	HugepagesOption string                       `json:"hugepages_option"`
+	HugepageSizeKb  int                          `json:"hugepage_size_kb"`
+	HugepageNr      *int                         `json:"hugepage_nr"`
+	NodeHugepages   []hostapi.HostNodeHugepageNr `json:"node_hugepages"`
+	EnableKsm       bool                         `json:"enable_ksm"`
 
 	Topology        *hostapi.HostTopology `json:"topology"`
 	CPUInfo         *hostapi.HostCPUInfo  `json:"cpu_info"`

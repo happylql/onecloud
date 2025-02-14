@@ -42,7 +42,7 @@ func init() {
 }
 
 func (self *EipAllocateTask) onFailed(ctx context.Context, eip *models.SElasticip, err error) {
-	eip.SetStatus(self.UserCred, api.EIP_STATUS_ALLOCATE_FAIL, err.Error())
+	eip.SetStatus(ctx, self.UserCred, api.EIP_STATUS_ALLOCATE_FAIL, err.Error())
 	self.setGuestAllocateEipFailed(eip, jsonutils.NewString(err.Error()))
 	notifyclient.EventNotify(ctx, self.GetUserCred(), notifyclient.SEventNotifyParam{
 		Obj:    eip,
@@ -65,7 +65,7 @@ func (self *EipAllocateTask) setGuestAllocateEipFailed(eip *models.SElasticip, r
 			return
 		}
 		guest := instance.(*models.SGuest)
-		guest.SetStatus(self.UserCred, api.INSTANCE_ASSOCIATE_EIP_FAILED, reason.String())
+		guest.SetStatus(context.Background(), self.UserCred, api.INSTANCE_ASSOCIATE_EIP_FAILED, reason.String())
 	}
 }
 
@@ -96,7 +96,7 @@ func (self *EipAllocateTask) OnInit(ctx context.Context, obj db.IStandaloneModel
 			lockman.LockObject(ctx, network)
 			defer lockman.ReleaseObject(ctx, network)
 
-			ipAddr, err := network.GetFreeIP(ctx, self.UserCred, nil, nil, reqIp, api.IPAllocationNone, false)
+			ipAddr, err := network.GetFreeIP(ctx, self.UserCred, nil, nil, reqIp, api.IPAllocationNone, false, api.AddressTypeIPv4)
 			if err != nil {
 				self.onFailed(ctx, eip, errors.Wrapf(err, "GetFreeIP(%s)", reqIp))
 				return
@@ -116,7 +116,7 @@ func (self *EipAllocateTask) OnInit(ctx context.Context, obj db.IStandaloneModel
 			}
 		}
 		if !eipIsManaged {
-			eip.SetStatus(self.UserCred, api.EIP_STATUS_READY, "allocated from network")
+			eip.SetStatus(ctx, self.UserCred, api.EIP_STATUS_READY, "allocated from network")
 		}
 		args.NetworkExternalId = network.ExternalId
 	}
@@ -127,19 +127,21 @@ func (self *EipAllocateTask) OnInit(ctx context.Context, obj db.IStandaloneModel
 		_cloudprovider := eip.GetCloudprovider()
 		args.ProjectId, err = _cloudprovider.SyncProject(ctx, self.GetUserCred(), eip.ProjectId)
 		if err != nil {
-			logclient.AddSimpleActionLog(eip, logclient.ACT_SYNC_CLOUD_PROJECT, err, self.UserCred, false)
+			if errors.Cause(err) != cloudprovider.ErrNotSupported && errors.Cause(err) != cloudprovider.ErrNotImplemented {
+				logclient.AddSimpleActionLog(eip, logclient.ACT_SYNC_CLOUD_PROJECT, err, self.UserCred, false)
+			}
 		}
 
 		iregion, err := eip.GetIRegion(ctx)
 		if err != nil {
-			eip.SetStatus(self.UserCred, api.EIP_STATUS_ALLOCATE_FAIL, "")
+			eip.SetStatus(ctx, self.UserCred, api.EIP_STATUS_ALLOCATE_FAIL, "")
 			self.onFailed(ctx, eip, errors.Wrapf(err, "eip.GetIRegion"))
 			return
 		}
 
 		extEip, err := iregion.CreateEIP(args)
 		if err != nil {
-			eip.SetStatus(self.UserCred, api.EIP_STATUS_ALLOCATE_FAIL, "")
+			eip.SetStatus(ctx, self.UserCred, api.EIP_STATUS_ALLOCATE_FAIL, "")
 			self.onFailed(ctx, eip, errors.Wrapf(err, "iregion.CreateEIP"))
 			return
 		}
@@ -147,7 +149,7 @@ func (self *EipAllocateTask) OnInit(ctx context.Context, obj db.IStandaloneModel
 		cloudprovider.WaitStatus(extEip, api.EIP_STATUS_READY, time.Second*5, time.Minute*3)
 
 		if err := eip.SyncWithCloudEip(ctx, self.UserCred, eip.GetCloudprovider(), extEip, nil); err != nil {
-			eip.SetStatus(self.UserCred, api.EIP_STATUS_ALLOCATE_FAIL, "")
+			eip.SetStatus(ctx, self.UserCred, api.EIP_STATUS_ALLOCATE_FAIL, "")
 			self.onFailed(ctx, eip, errors.Wrapf(err, "ip.SyncWithCloudEip"))
 			return
 		}

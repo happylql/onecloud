@@ -94,7 +94,39 @@ func (self *SRegion) ListGaussNoSQLInstances() ([]GaussDBNoSQL, error) {
 		if len(ret) >= part.TotalCount || len(part.Instances) == 0 {
 			break
 		}
-		query.Set("offset", fmt.Sprintf("%s", len(ret)))
+		query.Set("offset", fmt.Sprintf("%d", len(ret)))
+	}
+	return ret, nil
+}
+
+type SGaussNoSQLFlavor struct {
+	Vcpus    int
+	Ram      int
+	SpecCode string
+}
+
+func (self *SRegion) ListGaussNoSQLFlavors() ([]SGaussNoSQLFlavor, error) {
+	query := url.Values{}
+	query.Set("limit", "100")
+	ret := []SGaussNoSQLFlavor{}
+	for {
+		resp, err := self.list(SERVICE_GAUSSDB_NOSQL_V3_1, "flavors", query)
+		if err != nil {
+			return nil, err
+		}
+		part := struct {
+			Flavors []SGaussNoSQLFlavor
+			Total   int
+		}{}
+		err = resp.Unmarshal(&part)
+		if err != nil {
+			return nil, err
+		}
+		ret = append(ret, part.Flavors...)
+		if len(ret) >= part.Total || len(part.Flavors) == 0 {
+			break
+		}
+		query.Set("offset", fmt.Sprintf("%d", len(ret)))
 	}
 	return ret, nil
 }

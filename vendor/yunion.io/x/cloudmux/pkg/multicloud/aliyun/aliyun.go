@@ -17,7 +17,7 @@ package aliyun
 import (
 	"bytes"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -73,6 +73,7 @@ const (
 	ALIYUN_IMS_API_VERSION      = "2019-08-15"
 	ALIYUN_NAS_API_VERSION      = "2017-06-26"
 	ALIYUN_WAF_API_VERSION      = "2019-09-10"
+	ALIYUN_WAF_V2_API_VERSION   = "2021-10-01"
 	ALIYUN_MONGO_DB_API_VERSION = "2015-12-01"
 	ALIYUN_ES_API_VERSION       = "2017-06-13"
 	ALIYUN_KAFKA_API_VERSION    = "2019-09-16"
@@ -154,8 +155,9 @@ type SAliyunClient struct {
 	ownerId string
 	arn     string
 
-	nasEndpoints map[string]string
-	vpcEndpoints map[string]string
+	nasEndpoints  map[string]string
+	vpcEndpoints  map[string]string
+	hbaseEndpoint map[string]string
 
 	iregions []cloudprovider.ICloudRegion
 	iBuckets []cloudprovider.ICloudBucket
@@ -328,6 +330,24 @@ func _jsonRequest(client *sdk.Client, domain string, version string, apiName str
 		req.PathPattern = pathPattern
 		req.Method = method
 		req.GetHeaders()["Content-Type"] = "application/json"
+	} else if strings.HasPrefix(domain, "rocketmq") {
+		pathPattern, ok := params["PathPattern"]
+		if !ok {
+			return nil, errors.Errorf("Roa request missing pathPattern")
+		}
+		delete(params, "PathPattern")
+		req.PathPattern = pathPattern
+		req.Method = method
+		req.GetHeaders()["Content-Type"] = "application/json"
+	} else if strings.HasPrefix(domain, "fc") {
+		pathPattern, ok := params["PathPattern"]
+		if !ok {
+			return nil, errors.Errorf("Roa request missing pathPattern")
+		}
+		delete(params, "PathPattern")
+		req.PathPattern = fmt.Sprintf("/%s/%s", req.Version, strings.TrimPrefix(pathPattern, "/"))
+		req.Method = method
+		req.GetHeaders()["Content-Type"] = "application/json"
 	}
 
 	resp, err := processCommonRequest(client, req)
@@ -437,11 +457,11 @@ func (self *SAliyunClient) _getSdkClient(regionId string) (*sdk.Client, error) {
 		action := params.Get("Action")
 		respCheck := func(resp *http.Response) error {
 			if self.cpcfg.UpdatePermission != nil && resp.StatusCode >= 400 && resp.ContentLength > 0 {
-				body, err := ioutil.ReadAll(resp.Body)
+				body, err := io.ReadAll(resp.Body)
 				if err != nil {
 					return nil
 				}
-				resp.Body = ioutil.NopCloser(bytes.NewBuffer(body))
+				resp.Body = io.NopCloser(bytes.NewBuffer(body))
 				obj, err := jsonutils.Parse(body)
 				if err != nil {
 					return nil
@@ -827,8 +847,8 @@ func (self *SAliyunClient) GetAccountId() string {
 	return self.ownerId
 }
 
-func (self *SAliyunClient) GetIRegions() []cloudprovider.ICloudRegion {
-	return self.iregions
+func (self *SAliyunClient) GetIRegions() ([]cloudprovider.ICloudRegion, error) {
+	return self.iregions, nil
 }
 
 func (self *SAliyunClient) GetIRegionById(id string) (cloudprovider.ICloudRegion, error) {
@@ -896,13 +916,7 @@ func (self *SAliyunClient) GetProjects() ([]SResourceGroup, error) {
 		if err != nil {
 			return nil, errors.Wrap(err, "GetResourceGroups")
 		}
-		for i := range parts {
-			parts[i].AccountId = self.accessKey
-			if len(self.accountId) > 0 {
-				parts[i].AccountId = self.accountId
-			}
-			resourceGroups = append(resourceGroups, parts[i])
-		}
+		resourceGroups = append(resourceGroups, parts...)
 		if len(resourceGroups) >= total {
 			break
 		}
@@ -936,27 +950,14 @@ func (self *SAliyunClient) GetResourceGroupIds() []string {
 }
 
 func (self *SAliyunClient) GetIProjects() ([]cloudprovider.ICloudProject, error) {
-	defer func() {
-		self.accountId = ""
-	}()
-	accounts, err := self.GetSubAccounts()
+	ret := []cloudprovider.ICloudProject{}
+	resourceGroups, err := self.GetProjects()
 	if err != nil {
 		return nil, err
 	}
-	ret := []cloudprovider.ICloudProject{}
-	for _, account := range accounts {
-		info := strings.Split(account.Account, "/")
-		if len(info) == 2 {
-			self.accountId = info[1]
-		}
-		resourceGroups, err := self.GetProjects()
-		if err != nil {
-			return nil, err
-		}
-		for i := range resourceGroups {
-			resourceGroups[i].AccountId = account.Account
-			ret = append(ret, &resourceGroups[i])
-		}
+	for i := range resourceGroups {
+		resourceGroups[i].client = self
+		ret = append(ret, &resourceGroups[i])
 	}
 	return ret, nil
 }
@@ -1032,6 +1033,7 @@ func (region *SAliyunClient) GetCapabilities() []string {
 		cloudprovider.CLOUD_CAPABILITY_CONTAINER + cloudprovider.READ_ONLY_SUFFIX,
 		cloudprovider.CLOUD_CAPABILITY_TABLESTORE + cloudprovider.READ_ONLY_SUFFIX,
 		cloudprovider.CLOUD_CAPABILITY_CERT,
+		cloudprovider.CLOUD_CAPABILITY_SNAPSHOT_POLICY,
 	}
 	return caps
 }

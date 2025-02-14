@@ -24,6 +24,7 @@ import (
 	"yunion.io/x/onecloud/pkg/apis/compute"
 	"yunion.io/x/onecloud/pkg/cloudcommon/db"
 	"yunion.io/x/onecloud/pkg/cloudcommon/db/taskman"
+	"yunion.io/x/onecloud/pkg/cloudcommon/notifyclient"
 	"yunion.io/x/onecloud/pkg/compute/models"
 	"yunion.io/x/onecloud/pkg/util/logclient"
 )
@@ -38,17 +39,21 @@ func init() {
 
 func (self *InstanceBackupCreateTask) taskFailed(ctx context.Context, ib *models.SInstanceBackup, guest *models.SGuest, reason jsonutils.JSONObject, status string) {
 	if guest != nil {
-		guest.SetStatus(self.UserCred, compute.VM_INSTANCE_BACKUP_FAILED, reason.String())
+		guest.SetStatus(ctx, self.UserCred, compute.VM_INSTANCE_BACKUP_FAILED, reason.String())
 	}
 	reasonStr, _ := reason.GetString()
-	ib.SetStatus(self.UserCred, status, reasonStr)
+	ib.SetStatus(ctx, self.UserCred, status, reasonStr)
 	logclient.AddActionLogWithStartable(self, ib, logclient.ACT_CREATE, reason, self.UserCred, false)
 	self.SetStageFailed(ctx, reason)
 }
 
-func (self *InstanceBackupCreateTask) taskSuccess(ctx context.Context, ib *models.SInstanceBackup) {
-	ib.SetStatus(self.UserCred, compute.INSTANCE_BACKUP_STATUS_READY, "")
+func (self *InstanceBackupCreateTask) taskSuccess(ctx context.Context, ib *models.SInstanceBackup, guest *models.SGuest) {
+	ib.SetStatus(ctx, self.UserCred, compute.INSTANCE_BACKUP_STATUS_READY, "")
 	logclient.AddActionLogWithStartable(self, ib, logclient.ACT_CREATE, nil, self.UserCred, true)
+	notifyclient.EventNotify(ctx, self.UserCred, notifyclient.SEventNotifyParam{
+		Obj:    guest,
+		Action: notifyclient.ActionCreateBackupServer,
+	})
 	self.SetStageComplete(ctx, nil)
 }
 
@@ -57,14 +62,14 @@ func (self *InstanceBackupCreateTask) OnInit(ctx context.Context, obj db.IStanda
 	self.SetStage("OnInstanceBackup", nil)
 	guest := models.GuestManager.FetchGuestById(ib.GuestId)
 	params := jsonutils.NewDict()
-	ib.SetStatus(self.GetUserCred(), compute.INSTANCE_BACKUP_STATUS_SNAPSHOT, "")
+	ib.SetStatus(ctx, self.GetUserCred(), compute.INSTANCE_BACKUP_STATUS_SNAPSHOT, "")
 	if err := ib.GetRegionDriver().RequestCreateInstanceBackup(ctx, guest, ib, self, params); err != nil {
 		self.taskFailed(ctx, ib, guest, jsonutils.NewString(err.Error()), compute.INSTANCE_BACKUP_STATUS_SNAPSHOT_FAILED)
 	}
 }
 
 func (self *InstanceBackupCreateTask) OnKvmDisksSnapshot(ctx context.Context, ib *models.SInstanceBackup, data jsonutils.JSONObject) {
-	subTasks := taskman.SubTaskManager.GetTotalSubtasks(self.Id, "OnKvmDisksSnapshot", "")
+	subTasks := taskman.SubTaskManager.GetSubtasks(self.Id, "OnKvmDisksSnapshot", "")
 	guest := models.GuestManager.FetchGuestById(ib.GuestId)
 	self.SetStage("OnInstanceBackup", nil)
 	for i := range subTasks {
@@ -93,7 +98,7 @@ func (self *InstanceBackupCreateTask) OnKvmDisksSnapshot(ctx context.Context, ib
 			return
 		}
 	}
-	ib.SetStatus(self.GetUserCred(), compute.INSTANCE_BACKUP_STATUS_SAVING, "")
+	ib.SetStatus(ctx, self.GetUserCred(), compute.INSTANCE_BACKUP_STATUS_SAVING, "")
 	guest.StartSyncstatus(ctx, self.UserCred, "")
 }
 
@@ -102,7 +107,7 @@ func (self *InstanceBackupCreateTask) OnKvmDisksSnapshotFailed(ctx context.Conte
 }
 
 func (self *InstanceBackupCreateTask) OnInstanceBackup(ctx context.Context, ib *models.SInstanceBackup, data jsonutils.JSONObject) {
-	subTasks := taskman.SubTaskManager.GetTotalSubtasks(self.Id, "OnInstanceBackup", "")
+	subTasks := taskman.SubTaskManager.GetSubtasks(self.Id, "OnInstanceBackup", "")
 	for i := range subTasks {
 		if subTasks[i].Status == taskman.SUBTASK_SUCC {
 			continue
@@ -129,7 +134,8 @@ func (self *InstanceBackupCreateTask) OnInstanceBackup(ctx context.Context, ib *
 		ib.SizeMb = sizeMb
 		return nil
 	})
-	self.taskSuccess(ctx, ib)
+	guest := models.GuestManager.FetchGuestById(ib.GuestId)
+	self.taskSuccess(ctx, ib, guest)
 }
 
 func (self *InstanceBackupCreateTask) OnInstanceBackupFailed(ctx context.Context, ib *models.SInstanceBackup, data jsonutils.JSONObject) {

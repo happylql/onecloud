@@ -598,14 +598,10 @@ func (host *SHost) GetMemSizeMB() int {
 	return int(host.getHostSystem().Summary.Hardware.MemorySize / 1024 / 1024)
 }
 
-func (host *SHost) GetStorageInfo() []SHostStorageInfo {
-	if host.storageInfo == nil {
-		host.storageInfo = host.getStorageInfo()
-	}
-	return host.storageInfo
-}
-
 func (host *SHost) getStorageInfo() []SHostStorageInfo {
+	if host.storageInfo != nil {
+		return host.storageInfo
+	}
 	diskSlots := make(map[int]SHostStorageInfo)
 	list := host.getStorages()
 	for i := 0; i < len(list); i += 1 {
@@ -633,7 +629,8 @@ func (host *SHost) getStorageInfo() []SHostStorageInfo {
 			break
 		}
 	}
-	return disks
+	host.storageInfo = disks
+	return host.storageInfo
 }
 
 func (host *SHost) getStorages() []*SHostStorageAdapterInfo {
@@ -715,7 +712,7 @@ func (host *SHost) getStorages() []*SHostStorageAdapterInfo {
 	return adapterList
 }
 
-func (host *SHost) GetStorageSizeMB() int {
+func (host *SHost) GetStorageSizeMB() int64 {
 	storages, err := host.GetIStorages()
 	if err != nil {
 		log.Errorf("SHost.GetStorageSizeMB: SHost.GetIStorages: %s", err)
@@ -725,13 +722,13 @@ func (host *SHost) GetStorageSizeMB() int {
 	for _, stor := range storages {
 		size += stor.GetCapacityMB()
 	}
-	return int(size)
+	return size
 }
 
 func (host *SHost) GetStorageType() string {
 	ssd := 0
 	rotate := 0
-	storages := host.GetStorageInfo()
+	storages := host.getStorageInfo()
 	for i := 0; i < len(storages); i += 1 {
 		if storages[i].Rotate {
 			rotate += 1
@@ -769,6 +766,7 @@ func (host *SHost) CreateVM(desc *cloudprovider.SManagedVMCreateConfig) (cloudpr
 
 type SCreateVMParam struct {
 	Name                 string
+	Desc                 string `json:"description"`
 	Uuid                 string
 	OsName               string
 	CpuSockets           int
@@ -780,6 +778,7 @@ type SCreateVMParam struct {
 	Nics                 []jsonutils.JSONObject
 	ResourcePool         string
 	InstanceSnapshotInfo SEsxiInstanceSnapshotInfo
+	EnableEsxiSwap       bool
 }
 
 type SEsxiInstanceSnapshotInfo struct {
@@ -948,8 +947,12 @@ func (host *SHost) addDisks(ctx context.Context, dc *SDatacenter, ds *SDatastore
 		} else {
 			tds = ds
 		}
-		log.Debugf("ds: %s, size: %d, image path: %s, uuid: %s, index: %d, ctrlKey: %d, driver: %s, key: %d.", tds.getDatastoreObj().String(), size, imagePath, uuid, unitNumber, ctrlKey, disk.Driver, 2000+i)
-		spec := addDevSpec(NewDiskDev(size, SDiskConfig{
+		vds, err := tds.getDatastoreObj(ctx)
+		if err != nil {
+			return nil, errors.Wrapf(err, "getDatastoreObj")
+		}
+		log.Debugf("ds: %s, size: %d, image path: %s, uuid: %s, index: %d, ctrlKey: %d, driver: %s, key: %d.", vds.String(), size, imagePath, uuid, unitNumber, ctrlKey, disk.Driver, 2000+i)
+		diskDev, err := NewDiskDev(ctx, size, SDiskConfig{
 			SizeMb:        size,
 			Uuid:          uuid,
 			ControllerKey: int32(ctrlKey),
@@ -959,7 +962,11 @@ func (host *SHost) addDisks(ctx context.Context, dc *SDatacenter, ds *SDatastore
 			IsRoot:        i == 0,
 			Datastore:     tds,
 			Preallocation: disk.Preallocation,
-		}))
+		})
+		if err != nil {
+			return nil, errors.Wrapf(err, "NewDiskDev")
+		}
+		spec := addDevSpec(diskDev)
 		if len(imagePath) == 0 {
 			spec.FileOperation = "create"
 		}
@@ -1052,29 +1059,39 @@ func (host *SHost) DoCreateVM(ctx context.Context, ds *SDatastore, params SCreat
 		guestId = "windows7Server64Guest"
 	}
 
-	version := "vmx-10"
-	if host.isVersion50() {
-		version = "vmx-08"
-	}
+	version := host.getVmVersion()
 
 	if params.CpuSockets == 0 {
 		params.CpuSockets = 1
 	}
 
+	perSocket := params.Cpu / params.CpuSockets
+
 	spec := types.VirtualMachineConfigSpec{
 		Name:              name,
+		Annotation:        params.Desc,
 		Version:           version,
 		Uuid:              params.Uuid,
 		GuestId:           guestId,
 		NumCPUs:           int32(params.Cpu),
-		NumCoresPerSocket: int32(params.CpuSockets),
+		NumCoresPerSocket: int32(perSocket),
 		MemoryMB:          int64(params.Mem),
 		Firmware:          firmware,
 
 		CpuHotAddEnabled:    &True,
 		CpuHotRemoveEnabled: &True,
 		MemoryHotAddEnabled: &True,
+
+		ExtraConfig: []types.BaseOptionValue{},
 	}
+
+	if !params.EnableEsxiSwap {
+		spec.ExtraConfig = append(spec.ExtraConfig, &types.OptionValue{
+			Key:   "sched.swap.vmxSwapEnabled",
+			Value: "FALSE",
+		})
+	}
+
 	spec.Files = &types.VirtualMachineFileInfo{
 		VmPathName: datastorePath,
 	}
@@ -1272,7 +1289,11 @@ func (host *SHost) CloneVM(ctx context.Context, from *SVirtualMachine, snapshot 
 	folderref := folders.VmFolder.Reference()
 	poolref := resourcePool.Reference()
 	hostref := host.GetHostSystem().Reference()
-	dsref := ds.getDatastoreObj().Reference()
+	tds, err := ds.getDatastoreObj(ctx)
+	if err != nil {
+		return nil, errors.Wrapf(err, "getDatastoreObj")
+	}
+	dsref := tds.Reference()
 	relocateSpec := types.VirtualMachineRelocateSpec{
 		Folder:    &folderref,
 		Pool:      &poolref,
@@ -1297,16 +1318,26 @@ func (host *SHost) CloneVM(ctx context.Context, from *SVirtualMachine, snapshot 
 	if params.CpuSockets == 0 {
 		params.CpuSockets = 1
 	}
+	perSocket := params.Cpu / params.CpuSockets
 	spec := types.VirtualMachineConfigSpec{
 		Name:              name,
+		Annotation:        params.Desc,
 		Uuid:              params.Uuid,
 		NumCPUs:           int32(params.Cpu),
-		NumCoresPerSocket: int32(params.CpuSockets),
+		NumCoresPerSocket: int32(perSocket),
 		MemoryMB:          int64(params.Mem),
 
 		CpuHotAddEnabled:    &True,
 		CpuHotRemoveEnabled: &True,
 		MemoryHotAddEnabled: &True,
+
+		ExtraConfig: []types.BaseOptionValue{},
+	}
+	if !params.EnableEsxiSwap {
+		spec.ExtraConfig = append(spec.ExtraConfig, &types.OptionValue{
+			Key:   "sched.swap.vmxSwapEnabled",
+			Value: "FALSE",
+		})
 	}
 	cloneSpec.Config = &spec
 	task, err := ovm.Clone(ctx, folders.VmFolder, name, *cloneSpec)
@@ -1430,6 +1461,19 @@ func (host *SHost) CloneVM(ctx context.Context, from *SVirtualMachine, snapshot 
 			return vm, nil
 		}
 	}
+
+	task, err = vm.getVmObj().UpgradeVM(ctx, host.getVmVersion())
+	if err != nil {
+		log.Errorf("upgrade vm %s error: %v", vm.GetName(), err)
+		return vm, nil
+	}
+
+	err = task.Wait(ctx)
+	if err != nil {
+		log.Errorf("wait vm %s upgrade error: %v", vm.GetName(), err)
+		return vm, nil
+	}
+
 	return vm, nil
 }
 
@@ -1452,6 +1496,29 @@ func (host *SHost) isVersion50() bool {
 		return true
 	}
 	return false
+}
+
+func (host *SHost) getVmVersion() string {
+	ver := func() string {
+		version := host.GetVersion()
+		if len(version) >= 3 {
+			return version[:3]
+		}
+		return version
+	}()
+	version, ok := map[string]string{
+		"5.0": "vmx-08",
+		"5.1": "vmx-09",
+		"5.5": "vmx-10",
+		"6.0": "vmx-11",
+		"6.5": "vmx-13",
+		"6.7": "vmx-14",
+		"7.0": "vmx-17",
+	}[ver]
+	if ok {
+		return version
+	}
+	return "vmx-10"
 }
 
 func (host *SHost) GetIHostNics() ([]cloudprovider.ICloudHostNetInterface, error) {

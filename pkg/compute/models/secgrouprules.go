@@ -42,6 +42,8 @@ import (
 	"yunion.io/x/onecloud/pkg/util/stringutils2"
 )
 
+// +onecloud:swagger-gen-model-singular=secgrouprule
+// +onecloud:swagger-gen-model-plural=secgrouprules
 type SSecurityGroupRuleManager struct {
 	db.SResourceBaseManager
 	db.SStatusResourceBaseManager
@@ -112,9 +114,9 @@ func (manager *SSecurityGroupRuleManager) FetchOwnerId(ctx context.Context, data
 	return db.FetchProjectInfo(ctx, data)
 }
 
-func (manager *SSecurityGroupRuleManager) FilterByOwner(q *sqlchemy.SQuery, man db.FilterByOwnerProvider, userCred mcclient.TokenCredential, ownerId mcclient.IIdentityProvider, scope rbacscope.TRbacScope) *sqlchemy.SQuery {
+func (manager *SSecurityGroupRuleManager) FilterByOwner(ctx context.Context, q *sqlchemy.SQuery, man db.FilterByOwnerProvider, userCred mcclient.TokenCredential, ownerId mcclient.IIdentityProvider, scope rbacscope.TRbacScope) *sqlchemy.SQuery {
 	sq := SecurityGroupManager.Query("id")
-	sq = db.SharableManagerFilterByOwner(SecurityGroupManager, sq, userCred, ownerId, scope)
+	sq = db.SharableManagerFilterByOwner(ctx, SecurityGroupManager, sq, userCred, ownerId, scope)
 	return q.In("secgroup_id", sq.SubQuery())
 }
 
@@ -266,7 +268,7 @@ func (self *SSecurityGroupRule) BeforeInsert() {
 }
 
 func (manager *SSecurityGroupRuleManager) ValidateCreateData(ctx context.Context, userCred mcclient.TokenCredential, ownerId mcclient.IIdentityProvider, query jsonutils.JSONObject, input *api.SSecgroupRuleCreateInput) (*api.SSecgroupRuleCreateInput, error) {
-	_secgroup, err := validators.ValidateModel(userCred, SecurityGroupManager, &input.SecgroupId)
+	_secgroup, err := validators.ValidateModel(ctx, userCred, SecurityGroupManager, &input.SecgroupId)
 	if err != nil {
 		return input, err
 	}
@@ -305,7 +307,7 @@ func (self *SSecurityGroupRule) ValidateUpdateData(ctx context.Context, userCred
 	}
 
 	if input.CIDR == nil {
-		input.CIDR = &self.CIDR
+		// input.CIDR = &self.CIDR
 	}
 
 	driver, err := secgrp.GetRegionDriver()
@@ -342,18 +344,25 @@ func (self *SSecurityGroupRule) toRule() (*secrules.SecurityRule, error) {
 		Protocol:    self.Protocol,
 		Description: self.Description,
 	}
-	if regutils.MatchCIDR(self.CIDR) {
+	if regutils.MatchCIDR(self.CIDR) || regutils.MatchCIDR6(self.CIDR) {
 		_, rule.IPNet, _ = net.ParseCIDR(self.CIDR)
-	} else if regutils.MatchIPAddr(self.CIDR) {
+	} else if regutils.MatchIP4Addr(self.CIDR) {
 		rule.IPNet = &net.IPNet{
 			IP:   net.ParseIP(self.CIDR),
 			Mask: net.CIDRMask(32, 32),
 		}
-	} else {
+	} else if regutils.MatchIP6Addr(self.CIDR) {
 		rule.IPNet = &net.IPNet{
+			IP:   net.ParseIP(self.CIDR),
+			Mask: net.CIDRMask(128, 128),
+		}
+	} else {
+		// any
+		rule.IPNet = nil
+		/* &net.IPNet{
 			IP:   net.IPv4zero,
 			Mask: net.CIDRMask(0, 32),
-		}
+		} */
 	}
 
 	err := rule.ParsePorts(self.Ports)
@@ -371,6 +380,7 @@ func (self *SSecurityGroupRule) PostCreate(ctx context.Context, userCred mcclien
 	if secgroup, _ := self.GetSecGroup(); secgroup != nil {
 		logclient.AddSimpleActionLog(secgroup, logclient.ACT_ALLOCATE, data, userCred, true)
 		if len(secgroup.ManagerId) == 0 {
+			self.SetStatus(ctx, userCred, apis.STATUS_AVAILABLE, "")
 			secgroup.DoSync(ctx, userCred)
 			return
 		}
@@ -388,7 +398,7 @@ func (self *SSecurityGroupRule) PreDelete(ctx context.Context, userCred mcclient
 			secgroup.DoSync(ctx, userCred)
 			return
 		}
-		self.SetStatus(userCred, apis.STATUS_DELETING, "")
+		self.SetStatus(ctx, userCred, apis.STATUS_DELETING, "")
 		secgroup.StartSecurityGroupRuleDeleteTask(ctx, userCred, self.Id, "")
 	}
 }
@@ -410,7 +420,7 @@ func (self *SSecurityGroupRule) PostUpdate(ctx context.Context, userCred mcclien
 			secgroup.DoSync(ctx, userCred)
 			return
 		}
-		self.SetStatus(userCred, apis.STATUS_SYNC_STATUS, "")
+		self.SetStatus(ctx, userCred, apis.STATUS_SYNC_STATUS, "")
 		secgroup.StartSecurityGroupRuleUpdateTask(ctx, userCred, self.Id, "")
 	}
 }
@@ -551,7 +561,7 @@ func (self *SSecurityGroup) newFromCloudRule(ctx context.Context, userCred mccli
 	return SecurityGroupRuleManager.TableSpec().Insert(ctx, rule)
 }
 
-func (self *SSecurityGroupRule) SetStatus(userCred mcclient.TokenCredential, status, reason string) error {
+func (self *SSecurityGroupRule) SetStatus(ctx context.Context, userCred mcclient.TokenCredential, status, reason string) error {
 	if self.Status == status {
 		return nil
 	}

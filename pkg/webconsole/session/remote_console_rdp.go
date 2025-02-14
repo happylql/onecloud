@@ -15,11 +15,14 @@
 package session
 
 import (
+	"context"
 	"os/exec"
 
 	"yunion.io/x/jsonutils"
+	"yunion.io/x/pkg/errors"
 	"yunion.io/x/pkg/gotypes"
 
+	compute_api "yunion.io/x/onecloud/pkg/apis/compute"
 	api "yunion.io/x/onecloud/pkg/apis/webconsole"
 	"yunion.io/x/onecloud/pkg/httperrors"
 	"yunion.io/x/onecloud/pkg/mcclient"
@@ -34,16 +37,29 @@ type RemoteRDPConsoleInfo struct {
 	Password     string
 	ConnectionId string
 
+	guestDetails *compute_api.ServerDetails
+
 	Width  int
 	Height int
 	Dpi    int
 	s      *mcclient.ClientSession
 }
 
-func NewRemoteRDPConsoleInfoByCloud(s *mcclient.ClientSession, serverId string, query jsonutils.JSONObject) (*RemoteRDPConsoleInfo, error) {
+func NewRemoteRDPConsoleInfoByCloud(ctx context.Context, s *mcclient.ClientSession, serverId string, query jsonutils.JSONObject) (*RemoteRDPConsoleInfo, error) {
 	info := &RemoteRDPConsoleInfo{s: s}
 	if !gotypes.IsNil(query) {
-		query.Unmarshal(&info)
+		err := query.Unmarshal(&info)
+		if err != nil {
+			return nil, errors.Wrap(err, "Unmarshal")
+		}
+	}
+	if info.Port <= 0 {
+		info.Port = 3389
+	}
+	var err error
+	info.Host, info.Port, info.guestDetails, err = resolveServerIPPortById(ctx, s, serverId, info.Host, info.Port)
+	if err != nil {
+		return nil, errors.Wrap(err, "resolveServerIPPortById")
 	}
 	if len(info.Host) == 0 {
 		return nil, httperrors.NewMissingParameterError("host")
@@ -58,9 +74,6 @@ func NewRemoteRDPConsoleInfoByCloud(s *mcclient.ClientSession, serverId string, 
 		}
 		info.Password, _ = ret.GetString("password")
 		info.Username, _ = ret.GetString("username")
-	}
-	if info.Port == 0 {
-		info.Port = 3389
 	}
 	return info, nil
 }
@@ -107,4 +120,15 @@ func (info *RemoteRDPConsoleInfo) GetId() string {
 
 func (info *RemoteRDPConsoleInfo) GetRecordObject() *recorder.Object {
 	return nil
+}
+
+func (info *RemoteRDPConsoleInfo) GetDisplayInfo(ctx context.Context) (*SDisplayInfo, error) {
+	userInfo, err := fetchUserInfo(ctx, info.GetClientSession())
+	if err != nil {
+		return nil, errors.Wrap(err, "fetchUserInfo")
+	}
+	dispInfo := SDisplayInfo{}
+	dispInfo.WaterMark = fetchWaterMark(userInfo)
+	dispInfo.fetchGuestInfo(info.guestDetails)
+	return &dispInfo, nil
 }

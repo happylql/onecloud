@@ -37,6 +37,9 @@ var (
 	WafTypeDefault    = TWafType("Default")
 	WafTypeAppGateway = TWafType("AppGateway")
 
+	WafTypeSaaS         = TWafType("SaaS")
+	WafTypeLoadbalancer = TWafType("Loadbalancer")
+
 	WafStatementTypeByteMatch        = TWafStatementType("ByteMatch")
 	WafStatementTypeGeoMatch         = TWafStatementType("GeoMatch")
 	WafStatementTypeIPSet            = TWafStatementType("IPSet")
@@ -156,7 +159,7 @@ type SWafStatement struct {
 	// 是否取反操作, 仅对Azure生效
 	Negation bool `nullable:"false" list:"user"`
 	// 操作类型
-	// enum: EQ, NE, LE, LT, GE, GT
+	// enum: ["EQ", "NE", "LE", "LT", "GE", "GT"]
 	Operator TWafOperator `width:"20" charset:"ascii" nullable:"false" list:"user"`
 	// 匹配字段
 	// enmu: Body, JsonBody, Query, Method, Header, UriPath, PostArgs, Cookie

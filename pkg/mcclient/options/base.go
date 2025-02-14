@@ -245,7 +245,7 @@ type BaseListOptions struct {
 
 	Manager      []string `help:"List objects belonging to the cloud provider" json:"manager,omitempty"`
 	Account      string   `help:"List objects belonging to the cloud account" json:"account,omitempty"`
-	Provider     []string `help:"List objects from the provider" choices:"OneCloud|VMware|Aliyun|Apsara|Qcloud|Azure|Aws|Huawei|OpenStack|Ucloud|VolcEngine|ZStack|Google|Ctyun|Cloudpods|Nutanix|BingoCloud|IncloudSphere|JDcloud|Proxmox|Ceph|Ecloud|HCSO|HCS|HCSOP|H3C|S3|RemoteFile|Ksyun|Baidu|QingCloud" json:"provider,omitempty"`
+	Provider     []string `help:"List objects from the provider" choices:"OneCloud|VMware|Aliyun|Apsara|Qcloud|Azure|Aws|Huawei|OpenStack|Ucloud|VolcEngine|ZStack|Google|Ctyun|Cloudpods|Nutanix|BingoCloud|IncloudSphere|JDcloud|Proxmox|Ceph|CephFS|Ecloud|HCSO|HCS|HCSOP|H3C|S3|RemoteFile|Ksyun|Baidu|QingCloud|OracleCloud|SangFor|ZettaKit|UIS" json:"provider,omitempty"`
 	Brand        []string `help:"List objects belonging to a special brand"`
 	CloudEnv     string   `help:"Cloud environment" choices:"public|private|onpremise|private_or_onpremise" json:"cloud_env,omitempty"`
 	PublicCloud  *bool    `help:"List objects belonging to public cloud" json:"public_cloud"`
@@ -262,6 +262,8 @@ type BaseListOptions struct {
 
 	Id []string `help:"filter by id"`
 	// Name []string `help:"fitler by name"`
+
+	Status []string `help:"filter by status"`
 }
 
 func (opts *BaseListOptions) addTag(keyPrefix, tagstr string, idx int, params *jsonutils.JSONDict) error {
@@ -447,8 +449,8 @@ func (o *MultiArchListOptions) Params() (*jsonutils.JSONDict, error) {
 }
 
 type BaseUpdateOptions struct {
-	ID   string `help:"ID or Name of resource to update"`
-	Name string `help:"Name of resource to update"`
+	ID   string `help:"ID or Name of resource to update" json:"-"`
+	Name string `help:"Name of resource to update" json:"name"`
 	Desc string `metavar:"<DESCRIPTION>" help:"Description" json:"description"`
 }
 

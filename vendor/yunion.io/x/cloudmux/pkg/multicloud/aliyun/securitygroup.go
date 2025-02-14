@@ -21,6 +21,7 @@ import (
 
 	"yunion.io/x/jsonutils"
 	"yunion.io/x/pkg/errors"
+	"yunion.io/x/pkg/util/netutils"
 	"yunion.io/x/pkg/util/secrules"
 	"yunion.io/x/pkg/utils"
 
@@ -276,14 +277,22 @@ func (self *SRegion) CreateSecurityGroupRule(secGrpId string, opts *cloudprovide
 	action := "AuthorizeSecurityGroup"
 	params["Permissions.1.Priority"] = fmt.Sprintf("%d", opts.Priority)
 	if opts.Direction == secrules.SecurityRuleIngress {
-		params["Permissions.1.SourceCidrIp"] = "0.0.0.0/0"
-		if len(opts.CIDR) > 0 {
-			params["Permissions.1.SourceCidrIp"] = opts.CIDR
+		if _, err := netutils.NewIPV6Prefix(opts.CIDR); err == nil {
+			params["Permissions.1.Ipv6SourceCidrIp"] = opts.CIDR
+		} else {
+			params["Permissions.1.SourceCidrIp"] = "0.0.0.0/0"
+			if len(opts.CIDR) > 0 {
+				params["Permissions.1.SourceCidrIp"] = opts.CIDR
+			}
 		}
 	} else {
-		params["Permissions.1.DestCidrIp"] = "0.0.0.0/0"
-		if len(opts.CIDR) > 0 {
-			params["Permissions.1.DestCidrIp"] = opts.CIDR
+		if _, err := netutils.NewIPV6Prefix(opts.CIDR); err == nil {
+			params["Permissions.1.Ipv6DestCidrIp"] = opts.CIDR
+		} else {
+			params["Permissions.1.DestCidrIp"] = "0.0.0.0/0"
+			if len(opts.CIDR) > 0 {
+				params["Permissions.1.DestCidrIp"] = opts.CIDR
+			}
 		}
 		action = "AuthorizeSecurityGroupEgress"
 	}
@@ -354,7 +363,7 @@ func (self *SSecurityGroup) CreateRule(opts *cloudprovider.SecurityGroupRuleCrea
 		}
 		for i := range rules {
 			rule := rules[i]
-			if utils.IsInStringArray(rule.SecurityGroupRuleId, ruleIds) {
+			if !utils.IsInStringArray(rule.SecurityGroupRuleId, ruleIds) {
 				rule.region = self.region
 				return &rule, nil
 			}

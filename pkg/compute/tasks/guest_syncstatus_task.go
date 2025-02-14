@@ -16,6 +16,7 @@ package tasks
 
 import (
 	"context"
+	"fmt"
 
 	"yunion.io/x/cloudmux/pkg/cloudprovider"
 	"yunion.io/x/jsonutils"
@@ -26,6 +27,7 @@ import (
 	"yunion.io/x/onecloud/pkg/cloudcommon/db"
 	"yunion.io/x/onecloud/pkg/cloudcommon/db/taskman"
 	"yunion.io/x/onecloud/pkg/compute/models"
+	"yunion.io/x/onecloud/pkg/util/logclient"
 )
 
 type GuestSyncstatusTask struct {
@@ -38,17 +40,25 @@ func init() {
 
 func (self *GuestSyncstatusTask) OnInit(ctx context.Context, obj db.IStandaloneModel, data jsonutils.JSONObject) {
 	guest := obj.(*models.SGuest)
-	host, _ := guest.GetHost()
-	if host == nil || host.HostStatus == api.HOST_OFFLINE {
-		log.Errorf("host is not reachable")
-		guest.SetStatus(self.UserCred, api.VM_UNKNOWN, "Host not responding")
+	host, err := guest.GetHost()
+	if err != nil {
+		guest.SetStatus(ctx, self.UserCred, api.VM_UNKNOWN, fmt.Sprintf("get host error: %v", err))
+		self.SetStageComplete(ctx, nil)
+		return
+	}
+	if !host.IsBaremetal && host.HostStatus == api.HOST_OFFLINE {
+		guest.SetStatus(ctx, self.UserCred, api.VM_UNKNOWN, "host offline")
 		self.SetStageComplete(ctx, nil)
 		return
 	}
 	self.SetStage("OnGetStatusComplete", nil)
-	err := guest.GetDriver().RequestSyncstatusOnHost(ctx, guest, host, self.UserCred, self)
+	drv, err := guest.GetDriver()
 	if err != nil {
-		log.Errorf("request_syncstatus_on_host: %s", err)
+		self.OnGetStatusCompleteFailed(ctx, guest, jsonutils.NewString(err.Error()))
+		return
+	}
+	err = drv.RequestSyncstatusOnHost(ctx, guest, host, self.UserCred, self)
+	if err != nil {
 		self.OnGetStatusCompleteFailed(ctx, guest, jsonutils.NewString(err.Error()))
 		return
 	}
@@ -73,14 +83,16 @@ func (self *GuestSyncstatusTask) OnGetStatusComplete(ctx context.Context, obj db
 	case api.VM_BLOCK_STREAM, api.VM_BLOCK_STREAM_FAIL:
 		break
 	default:
-		statusStr = api.VM_UNKNOWN
+		if guest.GetHypervisor() != api.HYPERVISOR_POD {
+			statusStr = api.VM_UNKNOWN
+		}
 	}
 	if !self.HasParentTask() {
 		// migrating status hack
 		// not change migrating when:
 		//   guest.Status is migrating and task not has parent task
 		os := self.getOriginStatus()
-		if os == api.VM_MIGRATING && statusStr == api.VM_RUNNING {
+		if os == api.VM_MIGRATING && statusStr == api.VM_RUNNING && len(guest.ExternalId) == 0 {
 			statusStr = os
 		}
 	}
@@ -95,13 +107,13 @@ func (self *GuestSyncstatusTask) OnGetStatusComplete(ctx context.Context, obj db
 		BlockJobsCount: int(blockJobsCount),
 	}
 	guest.PerformStatus(ctx, self.UserCred, nil, input)
+	logclient.AddSimpleActionLog(guest, logclient.ACT_VM_SYNC_STATUS, "", self.UserCred, true)
 	self.SetStageComplete(ctx, nil)
-	// logclient.AddActionLog(guest, logclient.ACT_VM_SYNC_STATUS, "", self.UserCred, true)
 }
 
 func (self *GuestSyncstatusTask) OnGetStatusCompleteFailed(ctx context.Context, obj db.IStandaloneModel, err jsonutils.JSONObject) {
 	guest := obj.(*models.SGuest)
-	guest.SetStatus(self.UserCred, api.VM_UNKNOWN, err.String())
+	guest.SetStatus(ctx, self.UserCred, api.VM_UNKNOWN, err.String())
+	logclient.AddSimpleActionLog(guest, logclient.ACT_VM_SYNC_STATUS, err, self.UserCred, false)
 	self.SetStageComplete(ctx, nil)
-	// logclient.AddActionLog(guest, logclient.ACT_VM_SYNC_STATUS, err, self.UserCred, false)
 }

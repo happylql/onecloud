@@ -209,7 +209,7 @@ func (st *SScheduledTask) PostCreate(ctx context.Context, userCred mcclient.Toke
 	st.SVirtualResourceBase.PostCreate(ctx, userCred, ownerId, query, data)
 	// add label
 	createFailed := func(reason string) {
-		st.SetStatus(userCred, api.ST_STATUS_CREATE_FAILED, reason)
+		st.SetStatus(ctx, userCred, api.ST_STATUS_CREATE_FAILED, reason)
 		logclient.AddActionLogWithContext(ctx, st, logclient.ACT_CREATE, reason, userCred, false)
 	}
 	labels, _ := data.GetArray("labels")
@@ -442,6 +442,11 @@ func (st *SScheduledTask) Execute(ctx context.Context, userCred mcclient.TokenCr
 	if err != nil {
 		return err
 	}
+	if len(res) == 0 {
+		reason := fmt.Sprintf("All %ss %s failed:\n%s", st.ResourceType, st.Operation, errors.ErrNotFound)
+		sa.Fail(reason)
+		return nil
+	}
 	for id := range res {
 		ids = append(ids, id)
 	}
@@ -604,7 +609,7 @@ func (stm *SScheduledTaskManager) Timer(ctx context.Context, userCred mcclient.T
 
 func init() {
 	Register(ResourceServer, compute.Servers.ResourceManager)
-	Register(ResourceCloudAccount, compute.Cloudaccounts)
+	Register(ResourceCloudAccount, compute.Cloudaccounts.ResourceManager)
 }
 
 // Modules describe the correspondence between Resource and modulebase.ResourceManager,

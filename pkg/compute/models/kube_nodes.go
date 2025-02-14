@@ -35,6 +35,8 @@ import (
 	"yunion.io/x/onecloud/pkg/util/stringutils2"
 )
 
+// +onecloud:swagger-gen-model-singular=cloud_kube_node
+// +onecloud:swagger-gen-model-plural=cloud_kube_nodes
 type SKubeNodeManager struct {
 	db.SStatusStandaloneResourceBaseManager
 	db.SExternalizedResourceBaseManager
@@ -110,7 +112,7 @@ func (manager *SKubeNodeManager) FetchOwnerId(ctx context.Context, data jsonutil
 	return db.FetchProjectInfo(ctx, data)
 }
 
-func (manager *SKubeNodeManager) FilterByOwner(q *sqlchemy.SQuery, man db.FilterByOwnerProvider, userCred mcclient.TokenCredential, ownerId mcclient.IIdentityProvider, scope rbacscope.TRbacScope) *sqlchemy.SQuery {
+func (manager *SKubeNodeManager) FilterByOwner(ctx context.Context, q *sqlchemy.SQuery, man db.FilterByOwnerProvider, userCred mcclient.TokenCredential, ownerId mcclient.IIdentityProvider, scope rbacscope.TRbacScope) *sqlchemy.SQuery {
 	if ownerId != nil {
 		sq := KubeClusterManager.Query("id")
 		switch scope {
@@ -352,7 +354,7 @@ func (self *SKubeCluster) newFromCloudKubeNode(ctx context.Context, userCred mcc
 
 func (self *SKubeNode) Delete(ctx context.Context, userCred mcclient.TokenCredential) error {
 	log.Infof("kube node delete do nothing")
-	return self.SetStatus(userCred, apis.STATUS_DELETING, "")
+	return self.SetStatus(ctx, userCred, apis.STATUS_DELETING, "")
 }
 
 func (self *SKubeNode) RealDelete(ctx context.Context, userCred mcclient.TokenCredential) error {

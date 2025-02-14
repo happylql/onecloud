@@ -26,8 +26,10 @@ import (
 	"yunion.io/x/ovsdb/types"
 	"yunion.io/x/pkg/errors"
 	"yunion.io/x/pkg/util/netutils"
+	"yunion.io/x/pkg/util/regutils"
 	"yunion.io/x/pkg/utils"
 
+	commonapis "yunion.io/x/onecloud/pkg/apis"
 	apis "yunion.io/x/onecloud/pkg/apis/compute"
 	"yunion.io/x/onecloud/pkg/mcclient/auth"
 	agentmodels "yunion.io/x/onecloud/pkg/vpcagent/models"
@@ -260,19 +262,30 @@ func (keeper *OVNNorthboundKeeper) ClaimVpc(ctx context.Context, vpc *agentmodel
 
 func (keeper *OVNNorthboundKeeper) ClaimNetwork(ctx context.Context, network *agentmodels.Network, opts *options.Options) error {
 	var (
-		vpc     = network.Vpc
-		rpMac   = mac.HashSubnetRouterPortMac(network.Id)
-		dhcpMac = mac.HashSubnetDhcpMac(network.Id)
-		mdMac   = mac.HashSubnetMetadataMac(network.Id)
-		mdIp    = "169.254.169.254"
+		vpc   = network.Vpc
+		rpMac = mac.HashSubnetRouterPortMac(network.Id)
+		mdMac = mac.HashSubnetMetadataMac(network.Id)
+		mdIp  = "169.254.169.254"
 	)
 	netLs := &ovn_nb.LogicalSwitch{
 		Name: netLsName(network.Id),
 	}
+	networks := []string{
+		fmt.Sprintf("%s/%d", network.GuestGateway, network.GuestIpMask),
+	}
+	if len(network.GuestGateway6) > 0 && network.GuestIp6Mask > 0 {
+		networks = append(networks, fmt.Sprintf("%s/%d", network.GuestGateway6, network.GuestIp6Mask))
+	}
 	netRnp := &ovn_nb.LogicalRouterPort{
 		Name:     netRnpName(network.Id),
 		Mac:      rpMac,
-		Networks: []string{fmt.Sprintf("%s/%d", network.GuestGateway, network.GuestIpMask)},
+		Networks: networks,
+	}
+	if len(network.GuestGateway6) > 0 && network.GuestIp6Mask > 0 {
+		netRnp.Ipv6RaConfigs = map[string]string{
+			"address_mode": "dhcpv6_stateful",
+			// "send_periodic": "false",
+		}
 	}
 	netNrp := &ovn_nb.LogicalSwitchPort{
 		Name:      netNrpName(network.Id),
@@ -287,107 +300,84 @@ func (keeper *OVNNorthboundKeeper) ClaimNetwork(ctx context.Context, network *ag
 		Type:      "localport",
 		Addresses: []string{fmt.Sprintf("%s %s", mdMac, mdIp)},
 	}
-	var netAddrCidr string
-	if ipAddr, err := netutils.NewIPV4Addr(network.GuestGateway); err != nil {
-		return err
-	} else {
-		netAddr := ipAddr.NetAddr(network.GuestIpMask)
-		netAddrCidr = fmt.Sprintf("%s/%d", netAddr, network.GuestIpMask)
-	}
-	vpcExtBackRoute := &ovn_nb.LogicalRouterStaticRoute{
-		Policy:     ptr("dst-ip"),
-		IpPrefix:   netAddrCidr,
-		Nexthop:    apis.VpcInterExtIP1().String(),
-		OutputPort: ptr(vpcR2extpName(vpc.Id)),
-	}
-
-	routes := []string{
-		mdIp, "0.0.0.0",
-		"0.0.0.0/0", network.GuestGateway,
-	}
-	mtu := opts.OvnUnderlayMtu
-	mtu -= apis.VPC_OVN_ENCAP_COST
-	const (
-		leaseTime  = 86400 * 365 * 3
-		renewTime  = 86400
-		rebindTime = 86400 * 3
+	var (
+		vpcExtBackRoute       *ovn_nb.LogicalRouterStaticRoute
+		vpcExtBackRouteIdRef  string
+		vpcExtBackRoute6      *ovn_nb.LogicalRouterStaticRoute
+		vpcExtBackRoute6IdRef string
 	)
-	dhcpopts := &ovn_nb.DHCPOptions{
-		Cidr: fmt.Sprintf("%s/%d", network.GuestIpStart, network.GuestIpMask),
-		Options: map[string]string{
-			"server_id":              network.GuestGateway,
-			"server_mac":             dhcpMac,
-			"router":                 network.GuestGateway,
-			"classless_static_route": fmt.Sprintf("{%s}", strings.Join(routes, ",")),
-			"mtu":                    fmt.Sprintf("%d", mtu),
-			"lease_time":             fmt.Sprintf("%d", leaseTime),
-			"T1":                     fmt.Sprintf("%d", renewTime),
-			"T2":                     fmt.Sprintf("%d", rebindTime),
-		},
-		ExternalIds: map[string]string{
-			externalKeyOcRef: network.Id,
-		},
-	}
 	{
-		dnsSrvs := ""
-		if network.GuestDns != "" {
-			dnsSrvs = network.GuestDns
+		if ipAddr, err := netutils.NewIPV4Addr(network.GuestGateway); err != nil {
+			return errors.Wrap(err, "NewIPV4Addr GuestGateway")
 		} else {
-			dns, err := auth.GetDNSServers(opts.Region, "")
-			if err != nil {
-				// ignore the error
-				// log.Errorf("auth.GetDNSServers fail %s", err)
-			} else {
-				dnsSrvs = strings.Join(dns, ",")
+			netAddr := ipAddr.NetAddr(network.GuestIpMask)
+			netAddrCidr := fmt.Sprintf("%s/%d", netAddr, network.GuestIpMask)
+			ocStaticRouteRef := fmt.Sprintf("static-default-routes-%s", network.Id)
+			vpcExtBackRoute = &ovn_nb.LogicalRouterStaticRoute{
+				Policy:     ptr("dst-ip"),
+				IpPrefix:   netAddrCidr,
+				Nexthop:    apis.VpcInterExtIP1().String(),
+				OutputPort: ptr(vpcR2extpName(vpc.Id)),
+				ExternalIds: map[string]string{
+					externalKeyOcRef: ocStaticRouteRef,
+				},
 			}
-		}
-		if len(dnsSrvs) == 0 {
-			dnsSrvs = apis.DefaultDNSServers
-		}
-		dhcpopts.Options["dns_server"] = "{" + dnsSrvs + "}"
-	}
-	{
-		ntpSrvs := ""
-		if network.GuestNtp != "" {
-			ntpSrvs = network.GuestNtp
-		} else {
-			ntp, err := auth.GetNTPServers(opts.Region, "")
-			if err != nil {
-				// ignore
-				// log.Errorf("auth.GetNTPServers fail %s", err)
-			} else {
-				ntpSrvs = strings.Join(ntp, ",")
-			}
-		}
-		if len(ntpSrvs) > 0 {
-			dhcpopts.Options["ntp_server"] = "{" + ntpSrvs + "}"
+			vpcExtBackRouteIdRef = "vpcExtBackRoute"
 		}
 	}
+	/*if len(network.GuestGateway6) > 0 && network.GuestIp6Mask > 0 {
+		if ip6Addr, err := netutils.NewIPV6Addr(network.GuestGateway6); err != nil {
+			return errors.Wrap(err, "NewIPV6Addr GuestGateway6")
+		} else {
+			netAddr6 := ip6Addr.NetAddr(network.GuestIp6Mask)
+			netAddrCidr6 := fmt.Sprintf("%s/%d", netAddr6, network.GuestIp6Mask)
+			ocStaticRoute6Ref := fmt.Sprintf("static-default-routes6-%s", network.Id)
+			vpcExtBackRoute6 = &ovn_nb.LogicalRouterStaticRoute{
+				Policy:     ptr("dst-ip"),
+				IpPrefix:   netAddrCidr6,
+				Nexthop:    apis.VpcInterExtIP1().String(),
+				OutputPort: ptr(vpcR2extpName(vpc.Id)),
+				ExternalIds: map[string]string{
+					externalKeyOcRef: ocStaticRoute6Ref,
+				},
+			}
+			vpcExtBackRoute6IdRef = "vpcExtBackRoute6"
+		}
+	}*/
 
 	var (
 		args      []string
 		ocVersion = fmt.Sprintf("%s.%d", network.UpdatedAt, network.UpdateVersion)
 	)
-	allFound, args := cmp(&keeper.DB, ocVersion,
+	irows := []types.IRow{
 		netLs,
 		netRnp,
 		netNrp,
 		netMdp,
-		dhcpopts,
 		vpcExtBackRoute,
-	)
+	}
+	if vpcExtBackRoute6 != nil {
+		irows = append(irows, vpcExtBackRoute6)
+	}
+	allFound, args := cmp(&keeper.DB, ocVersion, irows...)
 	if allFound {
 		return nil
 	}
+
 	args = append(args, ovnCreateArgs(netLs, netLs.Name)...)
 	args = append(args, ovnCreateArgs(netRnp, netRnp.Name)...)
 	args = append(args, ovnCreateArgs(netNrp, netNrp.Name)...)
 	args = append(args, ovnCreateArgs(netMdp, netMdp.Name)...)
-	args = append(args, ovnCreateArgs(dhcpopts, "dhcpopts")...)
-	args = append(args, ovnCreateArgs(vpcExtBackRoute, "vpcExtBackRoute")...)
+	args = append(args, ovnCreateArgs(vpcExtBackRoute, vpcExtBackRouteIdRef)...)
+	if vpcExtBackRoute6 != nil {
+		args = append(args, ovnCreateArgs(vpcExtBackRoute6, vpcExtBackRoute6IdRef)...)
+	}
 	args = append(args, "--", "add", "Logical_Switch", netLs.Name, "ports", "@"+netNrp.Name, "@"+netMdp.Name)
 	args = append(args, "--", "add", "Logical_Router", vpcLrName(vpc.Id), "ports", "@"+netRnp.Name)
-	args = append(args, "--", "add", "Logical_Router", vpcExtLrName(vpc.Id), "static_routes", "@vpcExtBackRoute")
+	args = append(args, "--", "add", "Logical_Router", vpcExtLrName(vpc.Id), "static_routes", "@"+vpcExtBackRouteIdRef)
+	if vpcExtBackRoute6 != nil {
+		args = append(args, "--", "add", "Logical_Router", vpcExtLrName(vpc.Id), "static_routes", "@"+vpcExtBackRoute6IdRef)
+	}
 	return keeper.cli.Must(ctx, "ClaimNetwork", args)
 }
 
@@ -448,7 +438,141 @@ func (keeper *OVNNorthboundKeeper) ClaimVpcEipgw(ctx context.Context, vpc *agent
 	return keeper.cli.Must(ctx, "ClaimVpcEipgw", args)
 }
 
-func (keeper *OVNNorthboundKeeper) ClaimGuestnetwork(ctx context.Context, guestnetwork *agentmodels.Guestnetwork) error {
+func formatNtpServers(srvs string) string {
+	srv := make([]string, 0)
+	for _, part := range strings.Split(srvs, ",") {
+		part = strings.TrimSpace(part)
+		if len(part) > 0 {
+			if regutils.MatchIPAddr(part) {
+				srv = append(srv, part)
+			} else {
+				srv = append(srv, "\""+part+"\"")
+			}
+		}
+	}
+	return strings.Join(srv, ",")
+}
+
+func generateDhcpOptions(ctx context.Context, guestnetwork *agentmodels.Guestnetwork, opts *options.Options) *ovn_nb.DHCPOptions {
+	var (
+		network = guestnetwork.Network
+		dhcpMac = mac.HashSubnetDhcpMac(network.Id)
+		mdIp    = "169.254.169.254/32"
+
+		ocDhcpRef = fmt.Sprintf("dhcp/%s/%s", guestnetwork.GuestId, guestnetwork.Ifname)
+	)
+
+	mtu := opts.OvnUnderlayMtu
+	mtu -= apis.VPC_OVN_ENCAP_COST
+	var (
+		leaseTime  = opts.DhcpLeaseTime
+		renewTime  = opts.DhcpRenewalTime
+		rebindTime = opts.DhcpRenewalTime / 2
+	)
+	guestStartIp, _ := netutils.NewIPV4Addr(network.GuestIpStart)
+	cidr := fmt.Sprintf("%s/%d", guestStartIp.NetAddr(network.GuestIpMask).String(), network.GuestIpMask)
+	dhcpopts := &ovn_nb.DHCPOptions{
+		Cidr: cidr,
+		Options: map[string]string{
+			"server_id":  network.GuestGateway,
+			"server_mac": dhcpMac,
+			"router":     network.GuestGateway,
+			"mtu":        fmt.Sprintf("%d", mtu),
+			"lease_time": fmt.Sprintf("%d", leaseTime),
+			"T1":         fmt.Sprintf("%d", renewTime),
+			"T2":         fmt.Sprintf("%d", rebindTime),
+		},
+		ExternalIds: map[string]string{
+			externalKeyOcRef: ocDhcpRef,
+		},
+	}
+	{
+		routes := []string{}
+		if guestnetwork.IsDefault {
+			routes = append(routes,
+				mdIp, "0.0.0.0",
+				"0.0.0.0/0", network.GuestGateway,
+			)
+		} else {
+			routes = append(routes,
+				cidr, "0.0.0.0",
+			)
+		}
+		if len(routes) > 0 {
+			dhcpopts.Options["classless_static_route"] = fmt.Sprintf("{%s}", strings.Join(routes, ","))
+		}
+	}
+	{
+		dnsSrvs := network.GuestDns
+		if dnsSrvs == "" {
+			dns, err := auth.GetDNSServers(opts.Region, "")
+			if err != nil {
+				// ignore the error
+				// log.Errorf("auth.GetDNSServers fail %s", err)
+			} else {
+				dnsSrvs = strings.Join(dns, ",")
+			}
+		}
+		if dnsSrvs == "" {
+			dnsSrvs = opts.DNSServer
+		}
+		if len(dnsSrvs) > 0 {
+			dhcpopts.Options["dns_server"] = "{" + dnsSrvs + "}"
+		}
+	}
+	{
+		dnsDomain := network.GuestDomain
+		if dnsDomain == "" {
+			dnsDomain = opts.DNSDomain
+		}
+		if len(dnsDomain) > 0 && !commonapis.IsIllegalSearchDomain(dnsDomain) {
+			dhcpopts.Options["domain_name"] = "\"" + dnsDomain + "\""
+		}
+	}
+	{
+		ntpSrvs := ""
+		if network.GuestNtp != "" {
+			ntpSrvs = network.GuestNtp
+		} else {
+			ntp, err := auth.GetNTPServers(opts.Region, "")
+			if err != nil {
+				// ignore
+				// log.Errorf("auth.GetNTPServers fail %s", err)
+			} else {
+				ntpSrvs = strings.Join(ntp, ",")
+			}
+		}
+		if len(ntpSrvs) > 0 {
+			// bug on OVN, should not use ntp server: QiuJian
+			dhcpopts.Options["ntp_server"] = "{" + formatNtpServers(ntpSrvs) + "}"
+		}
+	}
+	return dhcpopts
+}
+
+func generateDhcp6Options(ctx context.Context, guestnetwork *agentmodels.Guestnetwork, opts *options.Options) *ovn_nb.DHCPOptions {
+	var (
+		network   = guestnetwork.Network
+		dhcpMac   = mac.HashSubnetDhcpMac(network.Id)
+		ocDhcpRef = fmt.Sprintf("dhcp6/%s/%s", guestnetwork.GuestId, guestnetwork.Ifname)
+	)
+
+	guestStartIp6, _ := netutils.NewIPV6Addr(network.GuestIp6Start)
+	cidr6 := fmt.Sprintf("%s/%d", guestStartIp6.NetAddr(network.GuestIp6Mask).String(), network.GuestIp6Mask)
+	dhcpopts := &ovn_nb.DHCPOptions{
+		Cidr: cidr6,
+		Options: map[string]string{
+			"server_id": dhcpMac,
+			// "dhcpv6_stateless": "false",
+		},
+		ExternalIds: map[string]string{
+			externalKeyOcRef: ocDhcpRef,
+		},
+	}
+	return dhcpopts
+}
+
+func (keeper *OVNNorthboundKeeper) ClaimGuestnetwork(ctx context.Context, guestnetwork *agentmodels.Guestnetwork, opts *options.Options) error {
 	var (
 		// Callers assure that guestnetwork.Guest is not nil
 		guest   = guestnetwork.Guest
@@ -463,29 +587,7 @@ func (keeper *OVNNorthboundKeeper) ClaimGuestnetwork(ctx context.Context, guestn
 		ocAclRef        = fmt.Sprintf("acl/%s/%s/%s", network.Id, guestnetwork.GuestId, guestnetwork.Ifname)
 		ocQosRef        = fmt.Sprintf("qos/%s/%s/%s", network.Id, guestnetwork.GuestId, guestnetwork.Ifname)
 		ocQosEipRef     = fmt.Sprintf("qos-eip/%s/%s/%s/v2", vpc.Id, guestnetwork.GuestId, guestnetwork.Ifname)
-		dhcpOpt         string
 	)
-
-	{
-		dhcpOptQuery := &ovn_nb.DHCPOptions{
-			ExternalIds: map[string]string{
-				externalKeyOcRef: guestnetwork.NetworkId,
-			},
-		}
-		if m := keeper.DB.DHCPOptions.FindOneMatchNonZeros(dhcpOptQuery); m != nil {
-			dhcpOpt = m.OvsdbUuid()
-		} else {
-			args := []string{
-				"--bare", "--columns=_uuid", "find", "DHCP_Options",
-				fmt.Sprintf("external_ids:%s=%q", externalKeyOcRef, guestnetwork.NetworkId),
-			}
-			res := keeper.cli.Must(ctx, "find dhcpopt", args)
-			dhcpOpt = strings.TrimSpace(res.Output)
-		}
-		if dhcpOpt == "" {
-			return fmt.Errorf("cannot find dhcpopt for subnet %s", guestnetwork.NetworkId)
-		}
-	}
 
 	var (
 		subIPs  = []string{guestnetwork.IpAddr}
@@ -498,11 +600,17 @@ func (keeper *OVNNorthboundKeeper) ClaimGuestnetwork(ctx context.Context, guestn
 	subIPms = append(subIPms, guestnetwork.Guest.GetVips()...)
 	sort.Strings(subIPs[1:])
 	sort.Strings(subIPms[1:])
+
+	if len(guestnetwork.Ip6Addr) > 0 {
+		// ipv6
+		subIPs = append(subIPs, guestnetwork.Ip6Addr)
+		subIPms = append(subIPms, fmt.Sprintf("%s/%d", guestnetwork.Ip6Addr, guestnetwork.Network.GuestIp6Mask), "fe80::/64")
+	}
+
 	gnp := &ovn_nb.LogicalSwitchPort{
-		Name:          lportName,
-		Addresses:     []string{fmt.Sprintf("%s %s", guestnetwork.MacAddr, strings.Join(subIPs, " "))},
-		Dhcpv4Options: &dhcpOpt,
-		Options:       map[string]string{},
+		Name:      lportName,
+		Addresses: []string{fmt.Sprintf("%s %s", guestnetwork.MacAddr, strings.Join(subIPs, " "))},
+		Options:   map[string]string{},
 	}
 	if guest.SrcMacCheck.IsFalse() {
 		gnp.Addresses = append(gnp.Addresses, "unknown")
@@ -510,7 +618,7 @@ func (keeper *OVNNorthboundKeeper) ClaimGuestnetwork(ctx context.Context, guestn
 		gnp.PortSecurity = []string{}
 	} else if guest.SrcIpCheck.IsFalse() {
 		gnp.PortSecurity = []string{
-			fmt.Sprintf("%s", guestnetwork.MacAddr),
+			guestnetwork.MacAddr,
 		}
 	} else {
 		gnp.PortSecurity = []string{
@@ -521,6 +629,19 @@ func (keeper *OVNNorthboundKeeper) ClaimGuestnetwork(ctx context.Context, guestn
 		}
 	}
 
+	var (
+		dhcpOpt     = generateDhcpOptions(ctx, guestnetwork, opts)
+		dhcpOptName = fmt.Sprintf("dhcp-opt-%s-%s", guestnetwork.GuestId, guestnetwork.Ifname)
+
+		dhcp6Opt     *ovn_nb.DHCPOptions
+		dhcp6OptName string
+	)
+
+	if len(guestnetwork.Ip6Addr) > 0 {
+		dhcp6Opt = generateDhcp6Options(ctx, guestnetwork, opts)
+		dhcp6OptName = fmt.Sprintf("dhcp6-opt-%s-%s", guestnetwork.GuestId, guestnetwork.Ifname)
+	}
+
 	var qosVif []*ovn_nb.QoS
 	if bwMbps := guestnetwork.BwLimit; bwMbps > 0 {
 		var (
@@ -528,7 +649,7 @@ func (keeper *OVNNorthboundKeeper) ClaimGuestnetwork(ctx context.Context, guestn
 			kbur = int64(kbps * 2)
 		)
 		qosVif = []*ovn_nb.QoS{
-			&ovn_nb.QoS{
+			{
 				Priority:  2000,
 				Direction: "from-lport",
 				Match:     fmt.Sprintf("inport == %q", lportName),
@@ -540,7 +661,7 @@ func (keeper *OVNNorthboundKeeper) ClaimGuestnetwork(ctx context.Context, guestn
 					externalKeyOcRef: ocQosRef,
 				},
 			},
-			&ovn_nb.QoS{
+			{
 				Priority:  1000,
 				Direction: "to-lport",
 				Match:     fmt.Sprintf("outport == %q", lportName),
@@ -621,10 +742,14 @@ func (keeper *OVNNorthboundKeeper) ClaimGuestnetwork(ctx context.Context, guestn
 
 	var acls []*ovn_nb.ACL
 	{
+		enableIPv6 := false
+		if len(guestnetwork.Ip6Addr) > 0 {
+			enableIPv6 = true
+		}
 		sgrs := guest.OrderedSecurityGroupRules()
 		for _, sgr := range sgrs {
 			// kvm not support peer secgroup
-			acl, err := ruleToAcl(lportName, sgr)
+			acl, err := ruleToAcl(lportName, sgr, enableIPv6)
 			if err != nil {
 				log.Errorf("converting security group rule to acl: %v", err)
 				break
@@ -638,6 +763,10 @@ func (keeper *OVNNorthboundKeeper) ClaimGuestnetwork(ctx context.Context, guestn
 
 	irows := []types.IRow{
 		gnp,
+		dhcpOpt,
+	}
+	if len(guestnetwork.Ip6Addr) > 0 {
+		irows = append(irows, dhcp6Opt)
 	}
 	if gnrDefault != nil {
 		irows = append(irows, gnrDefault)
@@ -657,6 +786,12 @@ func (keeper *OVNNorthboundKeeper) ClaimGuestnetwork(ctx context.Context, guestn
 	}
 
 	args = append(args, ovnCreateArgs(gnp, gnp.Name)...)
+	args = append(args, ovnCreateArgs(dhcpOpt, dhcpOptName)...)
+	args = append(args, "--", "add", "Logical_Switch_Port", gnp.Name, "dhcpv4_options", "@"+dhcpOptName)
+	if len(guestnetwork.Ip6Addr) > 0 {
+		args = append(args, ovnCreateArgs(dhcp6Opt, dhcp6OptName)...)
+		args = append(args, "--", "add", "Logical_Switch_Port", gnp.Name, "dhcpv6_options", "@"+dhcp6OptName)
+	}
 	args = append(args, "--", "add", "Logical_Switch", netLsName(guestnetwork.NetworkId), "ports", "@"+gnp.Name)
 	if gnrDefault != nil {
 		args = append(args, ovnCreateArgs(gnrDefault, "gnrDefault")...)
@@ -846,7 +981,7 @@ func (keeper *OVNNorthboundKeeper) ClaimVpcGuestDnsRecords(ctx context.Context, 
 		for _, guestnetwork := range network.Guestnetworks {
 			if guest := guestnetwork.Guest; guest != nil {
 				var (
-					name = guest.Name
+					name = guest.Hostname
 					ip   = guestnetwork.IpAddr
 				)
 				grs[name] = append(grs[name], ip)

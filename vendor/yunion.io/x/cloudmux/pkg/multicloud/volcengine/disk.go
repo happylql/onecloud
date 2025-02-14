@@ -145,12 +145,17 @@ func (disk *SDisk) GetMountpoint() string {
 	return ""
 }
 
-func (disk *SDisk) GetISnapshot(snapshotId string) (cloudprovider.ICloudSnapshot, error) {
-	return nil, errors.Wrapf(cloudprovider.ErrNotImplemented, "GetISnapshot")
-}
-
 func (disk *SDisk) GetISnapshots() ([]cloudprovider.ICloudSnapshot, error) {
-	return nil, errors.Wrapf(cloudprovider.ErrNotImplemented, "GetISnapshots")
+	snapshots, err := disk.storage.zone.region.GetSnapshots(disk.VolumeId, "", nil)
+	if err != nil {
+		return nil, err
+	}
+	ret := []cloudprovider.ICloudSnapshot{}
+	for i := range snapshots {
+		snapshots[i].region = disk.storage.zone.region
+		ret = append(ret, &snapshots[i])
+	}
+	return ret, nil
 }
 
 func (disk *SDisk) Reset(ctx context.Context, snapshotId string) (string, error) {
@@ -166,10 +171,6 @@ func (disk *SDisk) GetBillingType() string {
 
 func (disk *SDisk) GetCreatedAt() time.Time {
 	return disk.CreatedAt
-}
-
-func (disk *SDisk) GetExtSnapshotPolicyIds() ([]string, error) {
-	return nil, errors.ErrNotImplemented
 }
 
 func (disk *SDisk) GetExpiredAt() time.Time {
@@ -189,20 +190,20 @@ func (disk *SDisk) GetProjectId() string {
 	return disk.ProjectName
 }
 
-// Snapshot API is not supported, refer to
-// https://www.volcengine.com/docs/6460/195549
 func (disk *SDisk) CreateISnapshot(ctx context.Context, name, desc string) (cloudprovider.ICloudSnapshot, error) {
-	return nil, cloudprovider.ErrNotSupported
+	snapshot, err := disk.storage.zone.region.CreateSnapshot(disk.VolumeId, name, desc)
+	if err != nil {
+		return nil, err
+	}
+	return snapshot, nil
 }
 
 // region
-func (region *SRegion) GetDisks(instanceId string, zoneId string, category string, diskIds []string, pageNumber int, pageSize int) ([]SDisk, int, error) {
-	if pageSize > 100 || pageSize <= 0 {
-		pageSize = 100
-	}
+func (region *SRegion) GetDisks(instanceId string, zoneId string, category string, diskIds []string) ([]SDisk, error) {
 	params := make(map[string]string)
-	params["PageSize"] = fmt.Sprintf("%d", pageSize)
-	params["PageNumber"] = fmt.Sprintf("%d", pageNumber)
+	params["PageSize"] = "100"
+	pageNum := 1
+	params["PageNumber"] = fmt.Sprintf("%d", pageNum)
 
 	if len(instanceId) > 0 {
 		params["InstanceId"] = instanceId
@@ -218,18 +219,28 @@ func (region *SRegion) GetDisks(instanceId string, zoneId string, category strin
 		params[key] = id
 	}
 
-	body, err := region.storageRequest("DescribeVolumes", params)
-	if err != nil {
-		return nil, 0, errors.Wrap(err, "GetDisks fail")
+	ret := []SDisk{}
+	for {
+		resp, err := region.storageRequest("DescribeVolumes", params)
+		if err != nil {
+			return nil, errors.Wrap(err, "GetDisks fail")
+		}
+		part := struct {
+			Volumes    []SDisk
+			TotalCount int
+		}{}
+		err = resp.Unmarshal(&part)
+		if err != nil {
+			return nil, err
+		}
+		ret = append(ret, part.Volumes...)
+		if len(ret) >= part.TotalCount || len(part.Volumes) == 0 {
+			break
+		}
+		pageNum++
+		params["PageNumber"] = fmt.Sprintf("%d", pageNum)
 	}
-
-	disks := make([]SDisk, 0)
-	err = body.Unmarshal(&disks, "Volumes")
-	if err != nil {
-		return nil, 0, errors.Wrapf(err, "Unmarshal disk details fail")
-	}
-	total, _ := body.Int("TotalCount")
-	return disks, int(total), nil
+	return ret, nil
 }
 
 func (region *SRegion) CreateDisk(zoneId string, category string, name string, sizeGb int, desc string, projectId string) (string, error) {
@@ -254,7 +265,7 @@ func (region *SRegion) CreateDisk(zoneId string, category string, name string, s
 }
 
 func (region *SRegion) GetDisk(diskId string) (*SDisk, error) {
-	disks, _, err := region.GetDisks("", "", "", []string{diskId}, 1, 50)
+	disks, err := region.GetDisks("", "", "", []string{diskId})
 	if err != nil {
 		return nil, errors.Wrapf(err, fmt.Sprintf("%s not found", diskId))
 	}

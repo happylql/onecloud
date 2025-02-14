@@ -29,6 +29,7 @@ import (
 	"yunion.io/x/pkg/utils"
 
 	api "yunion.io/x/onecloud/pkg/apis/compute"
+	imageapi "yunion.io/x/onecloud/pkg/apis/image"
 	"yunion.io/x/onecloud/pkg/util/fileutils2"
 	"yunion.io/x/onecloud/pkg/util/procutils"
 	"yunion.io/x/onecloud/pkg/util/qemutils"
@@ -37,7 +38,22 @@ import (
 
 var (
 	ErrUnsupportedFormat = errors.Error("unsupported format")
+
+	convertWorkInOrder = false
+	convertCoroutines  = 16
 )
+
+func SetConvertWorkInOrder(workInOrder bool) {
+	convertWorkInOrder = workInOrder
+}
+
+func SetConvertCoroutines(coroutines int) error {
+	if coroutines < 1 || coroutines > 16 {
+		return errors.Errorf("coroutines %d out of range 1-16", coroutines)
+	}
+	convertCoroutines = coroutines
+	return nil
+}
 
 type TIONiceLevel int
 
@@ -48,6 +64,8 @@ const (
 	IONiceBestEffort = TIONiceLevel(2)
 	IONiceIdle       = TIONiceLevel(3)
 )
+
+const DefaultConvertCorutines = 8
 
 type SQemuImage struct {
 	Path            string
@@ -100,7 +118,7 @@ func (img *SQemuImage) parse() error {
 		fileInfo, err := procutils.RemoteStat(img.Path)
 		if err != nil {
 			if !os.IsNotExist(err) {
-				return err
+				return errors.Wrapf(err, "remote stat of %s", img.Path)
 			} else {
 				// not created yet
 				return nil
@@ -214,6 +232,9 @@ func (img *SQemuImage) parse() error {
 	// test if it is an ISO
 	if img.Format == qemuimgfmt.RAW && fileutils2.IsFile(img.Path) && fileutils2.IsIsoFile(img.Path) {
 		img.Format = qemuimgfmt.ISO
+	}
+	if img.Format == qemuimgfmt.RAW && fileutils2.IsFile(img.Path) && (fileutils2.IsTarGzipFile(img.Path) || fileutils2.IsTarFile(img.Path)) {
+		img.Format = imageapi.IMAGE_DISK_FORMAT_TGZ
 	}
 	return nil
 }
@@ -340,6 +361,14 @@ func convertOther(srcInfo, destInfo SImageInfo, compact bool, workerOpions []str
 	} else {
 		cmdline = append(cmdline, workerOpions...)
 	}
+
+	if !utils.IsInStringArray("-W", workerOpions) && !convertWorkInOrder {
+		cmdline = append(cmdline, "-W")
+	}
+	if !utils.IsInStringArray("-m", workerOpions) && convertCoroutines != DefaultConvertCorutines {
+		cmdline = append(cmdline, "-m", strconv.Itoa(convertCoroutines))
+	}
+
 	if compact {
 		cmdline = append(cmdline, "-c")
 	}
@@ -372,10 +401,13 @@ func convertEncrypt(srcInfo, destInfo SImageInfo, compact bool, workerOpions []s
 	if err != nil {
 		return errors.Wrapf(err, "NewQemuImage dest %s", destInfo.Path)
 	}
-	err = target.CreateQcow2(source.GetSizeMB(), compact, "", destInfo.Password, destInfo.EncryptFormat, destInfo.EncryptAlg)
-	if err != nil {
-		return errors.Wrapf(err, "Create target image %s", destInfo.Path)
+	if target.Format != qemuimgfmt.QCOW2 {
+		err = target.CreateQcow2(source.GetSizeMB(), compact, "", destInfo.Password, destInfo.EncryptFormat, destInfo.EncryptAlg)
+		if err != nil {
+			return errors.Wrapf(err, "Create target image %s", destInfo.Path)
+		}
 	}
+
 	cmdline := []string{"-c", strconv.Itoa(int(srcInfo.IoLevel)), qemutils.GetQemuImg(), "convert"}
 	if compact {
 		cmdline = append(cmdline, "-c")
@@ -389,6 +421,14 @@ func convertEncrypt(srcInfo, destInfo SImageInfo, compact bool, workerOpions []s
 	} else {
 		cmdline = append(cmdline, workerOpions...)
 	}
+
+	if !utils.IsInStringArray("-W", workerOpions) && !convertWorkInOrder {
+		cmdline = append(cmdline, "-W")
+	}
+	if !utils.IsInStringArray("-m", workerOpions) && convertCoroutines != DefaultConvertCorutines {
+		cmdline = append(cmdline, "-m", strconv.Itoa(convertCoroutines))
+	}
+
 	if srcInfo.Encrypted() {
 		if srcInfo.Format != qemuimgfmt.QCOW2 {
 			return errors.Wrap(errors.ErrNotSupported, "source image not support encryption")
@@ -609,7 +649,7 @@ func (img *SQemuImage) CloneRaw(name string) (*SQemuImage, error) {
 }
 
 func (img *SQemuImage) create(sizeMB int, format qemuimgfmt.TImageFormat, options []string, extraArgs []string) error {
-	if img.IsValid() {
+	if img.IsValid() && img.Format != qemuimgfmt.RAW {
 		return fmt.Errorf("create: the image is valid??? %s", img.Format)
 	}
 	args := []string{"-c", strconv.Itoa(int(img.IoLevel)),
@@ -687,6 +727,10 @@ func (img *SQemuImage) CreateQcow2(sizeMB int, compact bool, backPath string, pa
 		} else {
 			extraArgs = append(extraArgs, "-b", backPath)
 		}
+		if len(string(backQemu.Format)) > 0 {
+			extraArgs = append(extraArgs, "-F", string(backQemu.Format))
+		}
+
 		if !compact {
 			options = append(options, "cluster_size=2M")
 		}

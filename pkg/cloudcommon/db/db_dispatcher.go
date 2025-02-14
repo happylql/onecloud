@@ -26,7 +26,6 @@ import (
 	"yunion.io/x/log"
 	"yunion.io/x/pkg/errors"
 	"yunion.io/x/pkg/gotypes"
-	"yunion.io/x/pkg/util/filterclause"
 	"yunion.io/x/pkg/util/printutils"
 	"yunion.io/x/pkg/util/rbacscope"
 	"yunion.io/x/pkg/util/version"
@@ -41,6 +40,7 @@ import (
 	"yunion.io/x/onecloud/pkg/httperrors"
 	"yunion.io/x/onecloud/pkg/mcclient"
 	"yunion.io/x/onecloud/pkg/mcclient/auth"
+	"yunion.io/x/onecloud/pkg/util/filterclause"
 	"yunion.io/x/onecloud/pkg/util/logclient"
 	"yunion.io/x/onecloud/pkg/util/rbacutils"
 	"yunion.io/x/onecloud/pkg/util/stringutils2"
@@ -253,7 +253,8 @@ func ListItemQueryFilters(manager IModelManager,
 	return listItemQueryFilters(manager, ctx, q, userCred, query, action, false)
 }
 
-func listItemQueryFiltersRaw(manager IModelManager,
+func listItemQueryFiltersRaw(
+	manager IModelManager,
 	ctx context.Context, q *sqlchemy.SQuery,
 	userCred mcclient.TokenCredential,
 	query jsonutils.JSONObject,
@@ -266,12 +267,15 @@ func listItemQueryFiltersRaw(manager IModelManager,
 		return nil, httperrors.NewGeneralError(err)
 	}
 
-	query.(*jsonutils.JSONDict).Update(policyTagFilters.Json())
+	if !policyTagFilters.IsEmpty() {
+		query.(*jsonutils.JSONDict).Update(policyTagFilters.Json())
+		log.Debugf("policyTagFilers: %s", query)
+	}
 
 	if !useRawQuery {
 		// Specifically for joint resource, these filters will exclude
 		// deleted resources by joining with master/slave tables
-		q = manager.FilterByOwner(q, manager, userCred, ownerId, queryScope)
+		q = manager.FilterByOwner(ctx, q, manager, userCred, ownerId, queryScope)
 		q = manager.FilterBySystemAttributes(q, userCred, query, queryScope)
 		q = manager.FilterByHiddenSystemAttributes(q, userCred, query, queryScope)
 	}
@@ -579,18 +583,9 @@ func ListItems(manager IModelManager, ctx context.Context, userCred mcclient.Tok
 		limit = exportLimit
 	}
 
-	var (
-		q           *sqlchemy.SQuery
-		useRawQuery bool
-	)
-	{
-		// query senders are responsible for clear up other constraint
-		// like setting "pendinge_delete" to "all"
-		queryDelete, _ := query.GetString("delete")
-		if queryDelete == "all" && userCred.HasSystemAdminPrivilege() {
-			useRawQuery = true
-		}
-	}
+	var q *sqlchemy.SQuery
+
+	useRawQuery := isRawQuery(manager, userCred, query, policy.PolicyActionList)
 
 	queryDict, ok := query.(*jsonutils.JSONDict)
 	if !ok {
@@ -678,11 +673,7 @@ func ListItems(manager IModelManager, ctx context.Context, userCred mcclient.Tok
 		}
 		q = union.Query()
 	} else {
-		if useRawQuery {
-			q = manager.RawQuery()
-		} else {
-			q = manager.Query()
-		}
+		q = manager.NewQuery(ctx, userCred, queryDict, useRawQuery)
 	}
 
 	q, err = listItemQueryFiltersRaw(manager, ctx, q, userCred, queryDict, policy.PolicyActionList, true, useRawQuery)
@@ -693,11 +684,19 @@ func ListItems(manager IModelManager, ctx context.Context, userCred mcclient.Tok
 	var totalCnt int
 	var totalJson jsonutils.JSONObject
 	if pagingConf == nil {
-		// calculate total
-		totalQ := q.CountQuery()
-		totalCnt, totalJson, err = manager.CustomizedTotalCount(ctx, userCred, query, totalQ)
-		if err != nil {
-			return nil, errors.Wrap(err, "CustomizedTotalCount")
+		summaryStats := jsonutils.QueryBoolean(query, "summary_stats", false)
+		if summaryStats {
+			// calculate total
+			totalQ := q.CountQuery()
+			totalCnt, totalJson, err = manager.CustomizedTotalCount(ctx, userCred, query, totalQ)
+			if err != nil {
+				return nil, errors.Wrap(err, "CustomizedTotalCount")
+			}
+		} else {
+			totalCnt, err = q.CountWithError()
+			if err != nil {
+				return nil, errors.Wrap(err, "CountWithError")
+			}
 		}
 		//log.Debugf("total count %d", totalCnt)
 		if totalCnt == 0 {
@@ -912,6 +911,7 @@ func (dispatcher *DBModelDispatcher) List(ctx context.Context, query jsonutils.J
 	userCred := fetchUserCredential(ctx)
 	manager := dispatcher.manager.GetImmutableInstance(ctx, userCred, query)
 
+	ctx = manager.PrepareQueryContext(ctx, userCred, query)
 	// list详情
 	items, err := ListItems(manager, ctx, userCred, query, ctxIds)
 	if err != nil {
@@ -974,24 +974,23 @@ func getItemDetails(manager IModelManager, item IModel, ctx context.Context, use
 	return nil, httperrors.NewInternalServerError("FetchCustomizeColumns returns incorrect results(expect 1 actual %d)", len(extraRows))
 }
 
-func (dispatcher *DBModelDispatcher) tryGetModelProperty(ctx context.Context, property string, query jsonutils.JSONObject) (jsonutils.JSONObject, error) {
-	userCred := fetchUserCredential(ctx)
+func tryGetModelProperty(manager IModelManager, ctx context.Context, userCred mcclient.TokenCredential, property string, query jsonutils.JSONObject) (jsonutils.JSONObject, error) {
 	funcName := fmt.Sprintf("GetProperty%s", utils.Kebab2Camel(property, "-"))
-	manager := dispatcher.manager.GetImmutableInstance(ctx, userCred, query)
+
 	modelValue := reflect.ValueOf(manager)
-	params := []interface{}{ctx, userCred, query}
+	// params := []interface{}{ctx, userCred, query}
 
 	funcValue := modelValue.MethodByName(funcName)
 	if !funcValue.IsValid() || funcValue.IsNil() {
 		return nil, nil
 	}
 
-	_, _, err, _ := FetchCheckQueryOwnerScope(ctx, userCred, query, manager, policy.PolicyActionList, true)
-	if err != nil {
-		return nil, err
-	}
+	// _, _, err, _ := FetchCheckQueryOwnerScope(ctx, userCred, query, manager, policy.PolicyActionList, true)
+	// if err != nil {
+	// 	return nil, err
+	// }
 
-	outs, err := callFunc(funcValue, funcName, params...)
+	outs, err := callFunc(funcValue, funcName, ctx, userCred, query)
 	if err != nil {
 		return nil, httperrors.NewInternalServerError("reflect call %s fail %s", funcName, err)
 	}
@@ -1016,8 +1015,9 @@ func (dispatcher *DBModelDispatcher) Get(ctx context.Context, idStr string, quer
 	// log.Debugf("Get %s", idStr)
 	userCred := fetchUserCredential(ctx)
 	manager := dispatcher.manager.GetImmutableInstance(ctx, userCred, query)
+	ctx = manager.PrepareQueryContext(ctx, userCred, query)
 
-	data, err := dispatcher.tryGetModelProperty(ctx, idStr, query)
+	data, err := tryGetModelProperty(manager, ctx, userCred, idStr, query)
 	if err != nil {
 		return nil, err
 	} else if data != nil {
@@ -1054,6 +1054,8 @@ func (dispatcher *DBModelDispatcher) Get(ctx context.Context, idStr string, quer
 func (dispatcher *DBModelDispatcher) GetSpecific(ctx context.Context, idStr string, spec string, query jsonutils.JSONObject) (jsonutils.JSONObject, error) {
 	userCred := fetchUserCredential(ctx)
 	manager := dispatcher.manager.GetImmutableInstance(ctx, userCred, query)
+	ctx = manager.PrepareQueryContext(ctx, userCred, query)
+
 	model, err := fetchItem(manager, ctx, userCred, idStr, query)
 	if err == sql.ErrNoRows {
 		return nil, httperrors.NewResourceNotFoundError2(manager.Keyword(), idStr)
@@ -1284,7 +1286,7 @@ func _doCreateItem(
 		uniqValues := manager.FetchUniqValues(ctx, dataDict)
 		name, _ := dataDict.GetString("name")
 		if len(name) > 0 {
-			err = NewNameValidator(manager, ownerId, name, uniqValues)
+			err = NewNameValidator(ctx, manager, ownerId, name, uniqValues)
 			if err != nil {
 				return nil, err
 			}
@@ -1420,6 +1422,9 @@ func (dispatcher *DBModelDispatcher) Create(ctx context.Context, query jsonutils
 		defer lockman.ReleaseObject(ctx, model)
 
 		model.PostCreate(ctx, userCred, ownerId, query, data)
+		if err := manager.GetExtraHook().AfterPostCreate(ctx, userCred, ownerId, model, query, data); err != nil {
+			logclient.AddActionLogWithContext(ctx, model, logclient.ACT_POST_CREATE_HOOK, err, userCred, false)
+		}
 	}()
 
 	// 添加操作日志与消息通知
@@ -1633,14 +1638,22 @@ func (dispatcher *DBModelDispatcher) PerformAction(ctx context.Context, idStr st
 		return nil, httperrors.NewGeneralError(err)
 	}
 
-	lockman.LockObject(ctx, model)
-	defer lockman.ReleaseObject(ctx, model)
+	ret, err := func() (jsonutils.JSONObject, error) {
+		lockman.LockObject(ctx, model)
+		defer lockman.ReleaseObject(ctx, model)
 
-	if err := model.PreCheckPerformAction(ctx, userCred, action, query, data); err != nil {
-		return nil, err
+		if err := model.PreCheckPerformAction(ctx, userCred, action, query, data); err != nil {
+			return nil, errors.Wrap(err, "PreCheckPerformAction")
+		}
+		// 通过action与实例执行请求
+		return objectPerformAction(manager, model, reflect.ValueOf(model), ctx, userCred, action, query, data)
+	}()
+
+	if err != nil {
+		logclient.AddActionLogWithContext(ctx, model, action, err, userCred, false)
 	}
-	// 通过action与实例执行请求
-	return objectPerformAction(manager, model, reflect.ValueOf(model), ctx, userCred, action, query, data)
+
+	return ret, err
 }
 
 func objectPerformAction(manager IModelManager, model IModel, modelValue reflect.Value, ctx context.Context, userCred mcclient.TokenCredential, action string, query jsonutils.JSONObject, data jsonutils.JSONObject) (jsonutils.JSONObject, error) {
@@ -1745,11 +1758,11 @@ func reflectDispatcherInternal(
 	} else {
 		if model != nil {
 			if _, ok := model.(IStandaloneModel); ok {
-				Metadata.rawSetValues(ctx, model.Keyword(), model.GetId(), tagutils.Tagset2MapString(result.ObjectTags.Flattern()), false, "")
+				Metadata.rawSetValues(ctx, model.Keyword(), model.GetId(), tagutils.TagsetMap2MapString(result.ObjectTags.Flattern()), false, "")
 				if model.Keyword() == "project" {
-					Metadata.rawSetValues(ctx, model.Keyword(), model.GetId(), tagutils.Tagset2MapString(result.ProjectTags.Flattern()), false, "")
+					Metadata.rawSetValues(ctx, model.Keyword(), model.GetId(), tagutils.TagsetMap2MapString(result.ProjectTags.Flattern()), false, "")
 				} else if model.Keyword() == "domain" {
-					Metadata.rawSetValues(ctx, model.Keyword(), model.GetId(), tagutils.Tagset2MapString(result.DomainTags.Flattern()), false, "")
+					Metadata.rawSetValues(ctx, model.Keyword(), model.GetId(), tagutils.TagsetMap2MapString(result.DomainTags.Flattern()), false, "")
 				}
 			}
 		}
@@ -1759,6 +1772,13 @@ func reflectDispatcherInternal(
 			return ValueToJSONObject(resVal), nil
 		}
 	}
+}
+
+func DoUpdate(manager IModelManager, item IModel, ctx context.Context, userCred mcclient.TokenCredential, query jsonutils.JSONObject, data jsonutils.JSONObject) (jsonutils.JSONObject, error) {
+	lockman.LockObject(ctx, item)
+	defer lockman.ReleaseObject(ctx, item)
+
+	return updateItem(manager, item, ctx, userCred, query, data)
 }
 
 func updateItem(manager IModelManager, item IModel, ctx context.Context, userCred mcclient.TokenCredential, query jsonutils.JSONObject, data jsonutils.JSONObject) (jsonutils.JSONObject, error) {
@@ -1778,6 +1798,15 @@ func updateItem(manager IModelManager, item IModel, ctx context.Context, userCre
 	dataDict, err = ValidateUpdateData(item, ctx, userCred, query, dataDict)
 	if err != nil {
 		return nil, httperrors.NewGeneralError(errors.Wrapf(err, "ValidateUpdateData"))
+	}
+
+	if manager.HasName() && dataDict.Contains("name") {
+		// validate altername
+		nameStr, _ := dataDict.GetString("name")
+		err := alterNameValidator(ctx, item, nameStr)
+		if err != nil {
+			return nil, errors.Wrap(err, "alterNameValidator")
+		}
 	}
 
 	item.PreUpdate(ctx, userCred, query, dataDict)

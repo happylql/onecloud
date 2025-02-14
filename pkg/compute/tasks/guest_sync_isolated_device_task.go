@@ -40,14 +40,20 @@ func (self *GuestIsolatedDeviceSyncTask) needStart() bool {
 
 func (self *GuestIsolatedDeviceSyncTask) onTaskFail(ctx context.Context, guest *models.SGuest, err jsonutils.JSONObject) {
 	self.SetStageFailed(ctx, err)
-	guest.SetStatus(self.GetUserCred(), api.VM_SYNC_ISOLATED_DEVICE_FAILED, err.String())
+	guest.SetStatus(ctx, self.GetUserCred(), api.VM_SYNC_ISOLATED_DEVICE_FAILED, err.String())
 	logclient.AddActionLogWithStartable(self, guest, logclient.ACT_VM_SYNC_ISOLATED_DEVICE, err, self.GetUserCred(), false)
 }
 
 func (self *GuestIsolatedDeviceSyncTask) OnInit(ctx context.Context, obj db.IStandaloneModel, data jsonutils.JSONObject) {
 	guest := obj.(*models.SGuest)
 	self.SetStage("OnSyncConfigComplete", nil)
-	if err := guest.GetDriver().RequestSyncIsolatedDevice(ctx, guest, self); err != nil {
+	drv, err := guest.GetDriver()
+	if err != nil {
+		self.onTaskFail(ctx, guest, jsonErrorObj(err))
+		return
+	}
+	err = drv.RequestSyncIsolatedDevice(ctx, guest, self)
+	if err != nil {
 		self.onTaskFail(ctx, guest, jsonErrorObj(err))
 		return
 	}
@@ -67,6 +73,7 @@ func (self *GuestIsolatedDeviceSyncTask) OnSyncConfigCompleteFailed(ctx context.
 }
 
 func (self *GuestIsolatedDeviceSyncTask) OnStartComplete(ctx context.Context, obj *models.SGuest, data jsonutils.JSONObject) {
+	logclient.AddActionLogWithStartable(self, obj, logclient.ACT_VM_SYNC_ISOLATED_DEVICE, nil, self.GetUserCred(), true)
 	self.SetStageComplete(ctx, nil)
 }
 

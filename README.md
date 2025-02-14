@@ -1,14 +1,13 @@
 # Cloudpods
 
 [![CircleCI](https://circleci.com/gh/yunionio/cloudpods.svg?style=svg)](https://circleci.com/gh/yunionio/cloudpods)
-[![Build Status](https://travis-ci.com/yunionio/cloudpods.svg?branch=master)](https://travis-ci.com/yunionio/cloudpods/branches)
 [![Go Report Card](https://goreportcard.com/badge/github.com/yunionio/cloudpods)](https://goreportcard.com/report/github.com/yunionio/cloudpods)
 
 [English](./README.md) | [简体中文](./README-CN.md)
 
 ## What is Cloudpods?
 
-<img src="https://www.cloudpods.org/images/cloudpods_logo_green.png" alt="Cloudpods" height="100">
+<img src="https://v1.cloudpods.org/images/cloudpods_logo_green.png" alt="Cloudpods" height="100">
 
 Cloudpods is a cloud-native open source unified multi/hybrid-cloud platform developed with Golang, i.e. Cloudpods is *a cloud on clouds*. Cloudpods is able to manage not only on-premise KVM/baremetals, but also resources from many cloud accounts across many cloud providers. It hides the differences of underlying cloud providers and exposes one set of APIs that allow programatically interacting with these many clouds.
 
@@ -23,188 +22,7 @@ Cloudpods is a cloud-native open source unified multi/hybrid-cloud platform deve
 
 ## Features
 
-### Summary & UI
-
-![](https://www.cloudpods.org/zh/docs/introduce/images/interface1.gif)
-
-<details>
-  <summary>
-  Multi-cloud management that is able to manage a wide range of cloud providers, including private cloud, such as OpenStack, and public clouds, such as AWS, Azure, Google Cloud, Alibaba Cloud, Tencent Cloud, Huawei Cloud, etc.
-  </summary>
-  <ul>
-    <li>
-      <p>Cloud account create form</p>
-      <img src="https://www.cloudpods.org/zh/docs/practice/images/cloudselect.png" alt="multi cloud management">
-    </li>
-    <li>
-      <p>Cloud accounts list</p>
-      <img src="https://i.imgur.com/Q0LipfI.png" alt="cloud account list">
-    </li>
-    <li>
-      <p>Multi public cloud VM list</p>
-      <img src="https://www.cloudpods.org/zh/docs/practice/images/publicvmlist.png">
-    </li>
-  </ul>
-</details>
-
-<details>
-  <summary>
-  A light-weight private cloud that manages KVM hypervisor in scale
-  </summary>
-  <ul>
-    <li>
-      <p>VM instances list</p>
-      <img src="https://i.imgur.com/DbkRUoo.png">
-    </li>
-    <li>
-      <p>Create VM instance form</p>
-      <img src="https://www.cloudpods.org/zh/docs/practice/images/createkvmvm1.png">
-      <img src="https://www.cloudpods.org/zh/docs/practice/images/createkvmvm2.png">
-    </li>
-    <li>
-      <p>VNC and SSH login page</p>
-      <img src="https://i.imgur.com/m0rkeQ3.png">
-    </li>
-    <li>
-      <p>Host list</p>
-      <img src="https://imgur.com/i509t5a.png">
-    </li>
-    <li>
-      <p>Image template list</p>
-      <img src="https://imgur.com/UVFLGi2.png">
-    </li>
-    <li>
-      <p>VPC list</p>
-      <img src="https://www.cloudpods.org/zh/docs/practice/images/vpclist.png">
-    </li>
-    <li>
-      <p>Wire list (Classic Network)</p>
-      <img src="https://www.cloudpods.org/zh/docs/practice/images/wirelist.png">
-    </li>
-    <li>
-      <p>IPsubnet list</p>
-      <img src="https://www.cloudpods.org/zh/docs/practice/images/ipsubnetlist.png">
-    </li> 
-    <li>
-      <p>Eip list (VPC Network)</p>
-      <img src="https://www.cloudpods.org/zh/docs/practice/images/vpclist.png">
-    </li>
-    <li>
-      <p>LB list</p>
-      <img src="https://www.cloudpods.org/zh/docs/practice/images/lblist.png">
-    </li>   
-  </ul>
-</details>
-
-<details>
-  <summary>
-  A BareMetal cloud that automates the full life-cycle management of baremetal physical machines
-  </summary>
-  <ul>
-    <li>
-      <p>BareMetal list</p>
-      <img src="https://www.cloudpods.org/zh/docs/practice/images/physicalmachinelist.png">
-    </li>
-    <li>
-      <p>Baremetal Management</p>
-      <img src="https://www.cloudpods.org/zh/docs/practice/images/addphysicalmachine.png">
-    </li>
-    <li>
-      <p>Create OS on BareMetal</p>
-      <img src="https://www.cloudpods.org/zh/docs/practice/images/createbaremetal.png">
-    </li>
-    <li>ARM64 baremetal supported</li>
-  </ul>
-</details>
-
-<details>
-  <summary>
-  A complete multi-tenancy RBAC-enabled IAM (identity and access management) system
-  </summary>
-  <ul>
-    <li>
-      <p>sql, LDAP supported</p>
-      <img src="https://www.cloudpods.org/zh/docs/practice/images/idplist.png">
-    </li>
-    <li>
-      <p>Multi-tenancy system, include domain, project, group, user, role, policy</p>
-      <img src="https://www.cloudpods.org/zh/docs/practice/images/domainlist.png">
-      <img src="https://www.cloudpods.org/zh/docs/practice/images/projectlist.png">
-      <img src="https://www.cloudpods.org/zh/docs/practice/images/grouplist.png">
-      <img src="https://www.cloudpods.org/zh/docs/practice/images/userlist.png">
-      <img src="https://www.cloudpods.org/zh/docs/practice/images/rolelist.png">
-      <img src="https://www.cloudpods.org/zh/docs/practice/images/policylist.png">
-  </ul>
-</details>
-
-<details>
-  <summary>
-  VMware vSphere management that enables self-service and automation
-  </summary>
-  <ul>
-    <li>
-      <p>Add VMware account</p>
-      <img src="https://www.cloudpods.org/zh/docs/practice/images/createvmware.png">
-    </li>
-    <li>
-      <p>VMware account list</p>
-      <img src="https://www.cloudpods.org/zh/docs/practice/images/vmwarelist.png">
-    </li>
-    <li>
-      <p>Automatic creation of wire</p>
-      <img src="https://www.cloudpods.org/zh/docs/practice/images/vmwarewirelist.png">
-    </li>
-    <li>
-      <p>Automatic creation of ipsubnet</p>
-      <img src="https://www.cloudpods.org/zh/docs/practice/images/vmwareipsubnetlist.png">
-    </li>
-    <li>
-      <p>Create a VMware VM instance</p>
-      <img src="https://www.cloudpods.org/zh/docs/practice/images/createvmwarevm1.png">
-      <img src="https://www.cloudpods.org/zh/docs/practice/images/createvmwarevm2.png">
-    </li>
-  </ul>
-</details>
-
-
-<details>
-  <summary>
-  Cloud SSO that allows accessing native webconsole of cloud providers with unified federated identities
-  </summary>
-  <ul>
-    <li>
-      <p>Enable the SSO login function of the cloud account (aliyun as an example)</p>
-      <img src="https://www.cloudpods.org/zh/docs/practice/images/enablecloudsso.png">
-    </li>
-    <li>
-      <p>create saml users</p>
-      <img src="https://www.cloudpods.org/zh/docs/practice/images/addsamluser.png">
-    </li>
-    <li>
-      <p>Cloud SSO entry</p>
-      <img src="https://www.cloudpods.org/zh/docs/practice/images/cloudssoentry.png">
-    </li>
-    <li>
-      <p>Cloud SSO - SSO login user</p>
-      <img src="https://www.cloudpods.org/zh/docs/practice/images/cloudsamluser.png">
-    </li>
-    <li>
-      <p>Sign in to the public cloud platform with SSO</p>
-    </li>
-  </ul>
-</details>
-
-<details>
-  <summary>
-  One set of feature-rich APIs to access a wide range of resources from cloud providers above with consistent models and APIs
-  </summary>
-</details>
-
-<details>
-  <summary>
-  Multi-cloud image management system that automates image conversion between different cloud providers
-  </summary>
-</details>
+See [Introduction](https://www.cloudpods.org/docs/introduction/) for details.
 
 ### Supported cloud providers
 
@@ -235,7 +53,7 @@ Cloudpods is a cloud-native open source unified multi/hybrid-cloud platform deve
 ### Supported resources
 
 * Servers: instances, disks, network interfaces, networks, vpcs, storages, hosts, wires, snapshots, snapshot policies, security groups, elastic IPs, SSH keypairs, images
-* Load Balancers: instances, listeners, backend groups, backends, TSL certificates, ACLs
+* Load Balancers: instances, listeners, backend groups, backends, TLS certificates, ACLs
 * Object Storage: buckets, objects
 * NAS: file_systems, access_groups, mount_targets
 * RDS: instances, accounts, backups, databases, parameters, privileges
@@ -245,10 +63,7 @@ Cloudpods is a cloud-native open source unified multi/hybrid-cloud platform deve
 
 ## Getting started
 
-- [All in One Installation](https://www.cloudpods.org/zh/docs/quickstart/allinone-converge/)：Building a full-featured Cloudpods service on linux distributions such as CentOS 7 or Debian 10 allows for a quick experience of the **built-in private cloud** and **multi-cloud management** features.
-- [Kubernetes Helm Installation](https://www.cloudpods.org/zh/docs/quickstart/k8s/)：Deploying the Cloudpods CMP service on an existing Kubernetes cluster using Helm and experience the **multi-cloud management** feature.
-- [Docker Compose Installation](https://www.cloudpods.org/zh/docs/quickstart/docker-compose/)：Deploying the Cloudpods CMP service using Docker Compose and quickly experience the **multi-cloud management** feature.
-- [High availability installation](https://www.cloudpods.org/zh/docs/setup/ha-ce/)：Deploying Cloudpods services in a highly available manner for production environments, including **built-in private cloud** and **multi-cloud management** features.
+Please refer to the document [Getting Started](https://www.cloudpods.org/en/docs/getting-started/) to select the appropriate scenario for installation.
 
 ## Documentations
 
@@ -263,23 +78,13 @@ Please check this [issue](https://github.com/yunionio/cloudpods/issues/11427) fo
 
 ## Contact
 
-You may contact us by:
+* See [Contact Us](https://www.cloudpods.org/en/docs/contact/) for details.
 
-* Enterprise Support: [Subscription](https://www.yunion.cn/subscription/index.html)
-
-* WeChat: please scan the following QRCode to contact us
-
-<img src="https://www.cloudpods.org/images/contact_me_qr_20230321.png" alt="WeChat QRCode">
-
-* Bilibili: [Cloudpods](https://space.bilibili.com/3493131737631540/)
+* Telegram: [cloudpods](https://t.me/cloudpods_org)
 
 ## Changelog
 
-See [Cloudpods Changelog](https://www.cloudpods.org/en/docs/changelog/) for details.
-
-## Roadmap
-
-See [Cloudpods Roadmap](https://www.cloudpods.org/en/docs/roadmap/) for details.
+See [Relase Notes](https://www.cloudpods.org/en/docs/release-notes/) and [Changelog](https://www.cloudpods.org/en/docs/development/changelog/) for details.
 
 ## Contribution
 

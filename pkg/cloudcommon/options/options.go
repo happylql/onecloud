@@ -19,7 +19,7 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -42,6 +42,7 @@ import (
 	"yunion.io/x/onecloud/pkg/cloudcommon/consts"
 	"yunion.io/x/onecloud/pkg/httperrors"
 	"yunion.io/x/onecloud/pkg/util/atexit"
+	"yunion.io/x/onecloud/pkg/util/fileutils2"
 )
 
 const (
@@ -69,7 +70,12 @@ type BaseOptions struct {
 
 	ApplicationID      string `help:"Application ID"`
 	RequestWorkerCount int    `default:"8" help:"Request worker thread count, default is 8"`
-	TaskWorkerCount    int    `default:"4" help:"Task manager worker thread count, default is 4"`
+
+	TaskWorkerCount      int `default:"4" help:"Task manager worker thread count, default is 4"`
+	LocalTaskWorkerCount int `default:"4" help:"Worker thread count that runs local tasks, default is 4"`
+
+	TaskArchiveThresholdHours int `default:"168" help:"The threshold in hours to migrate tasks to archives, default is 7days(168hours)"`
+	TaskArchiveIntervalHours  int `default:"2" help:"The interval to migrate tasks to archives, default is 2 hours"`
 
 	DefaultProcessTimeoutSeconds int `default:"60" help:"request process timeout, default is 60 seconds"`
 
@@ -118,6 +124,9 @@ type BaseOptions struct {
 	PlatformNames map[string]string `help:"identity name of this platform by language"`
 
 	EnableAppProfiling bool `help:"enable profiling API" default:"false"`
+
+	EnableChangeOwnerAutoRename bool `help:"Allows renaming when changing names" default:"false"`
+	EnableDefaultPolicy         bool `help:"Enable defualt policies" default:"true"`
 }
 
 const (
@@ -136,7 +145,7 @@ type CommonOptions struct {
 
 	TenantCacheExpireSeconds int `help:"expire seconds of cached tenant/domain info. defailt 15 minutes" default:"900"`
 
-	SessionEndpointType string `help:"Client session end point type"`
+	SessionEndpointType string `help:"Client session end point type" default:"internal"`
 
 	BaseOptions
 }
@@ -149,7 +158,10 @@ type HostCommonOptions struct {
 
 	EnableRemoteExecutor bool `help:"Enable remote executor" default:"false"`
 
-	ExecutorConnectTimeoutSeconds int `help:"executor client connection timeout in seconds, default is 30" default:"30"`
+	EnableIsolatedDeviceWhitelist bool   `help:"enable isolated device white list" default:"false"`
+	ExecutorConnectTimeoutSeconds int    `help:"executor client connection timeout in seconds, default is 30" default:"30"`
+	ImageDeployDriver             string `help:"Image deploy driver" default:"qemu-kvm" choices:"qemu-kvm|nbd|libguestfs"`
+	DeployConcurrent              int    `help:"qemu-kvm deploy driver concurrent" default:"5"`
 }
 
 type DBOptions struct {
@@ -160,6 +172,8 @@ type DBOptions struct {
 	OpsLogWithClickhouse   bool `help:"store operation logs with clickhouse" default:"false"`
 	EnableDBChecksumTables bool `help:"Enable DB tables with record checksum for consistency"`
 	DBChecksumSkipInit     bool `help:"Skip DB tables with record checksum calculation when init" default:"false"`
+
+	DBChecksumHashAlgorithm string `help:"hash algorithm for db checksum hash" choices:"md5|sha256" default:"sha256"`
 
 	AutoSyncTable   bool `help:"Automatically synchronize table changes if differences are detected"`
 	ExitAfterDBInit bool `help:"Exit program after db initialization" default:"false"`
@@ -210,7 +224,7 @@ func (opt *EtcdOptions) GetEtcdTLSConfig() (*tls.Config, error) {
 		opt.EtcdUseTLS = true
 	}
 	if opt.EtcdCacert != "" {
-		data, err := ioutil.ReadFile(opt.EtcdCacert)
+		data, err := os.ReadFile(opt.EtcdCacert)
 		if err != nil {
 			return nil, errors.Wrap(err, "read cacert file")
 		}
@@ -265,7 +279,15 @@ func (opt *DBOptions) GetClickhouseConnStr() (string, string, error) {
 	return "clickhouse", opt.Clickhouse, nil
 }
 
+func ParseOptionsIgnoreNoConfigfile(optStruct interface{}, args []string, configFileName string, serviceType string) {
+	parseOptions(optStruct, args, configFileName, serviceType, true)
+}
+
 func ParseOptions(optStruct interface{}, args []string, configFileName string, serviceType string) {
+	parseOptions(optStruct, args, configFileName, serviceType, false)
+}
+
+func parseOptions(optStruct interface{}, args []string, configFileName string, serviceType string, ignoreNoConfigfile bool) {
 	if len(serviceType) == 0 {
 		log.Fatalf("ServiceType must provided!")
 	}
@@ -315,10 +337,14 @@ func ParseOptions(optStruct interface{}, args []string, configFileName string, s
 	}
 
 	if len(optionsRef.Config) > 0 {
-		log.Infof("Use configuration file: %s", optionsRef.Config)
-		err = parser.ParseFile(optionsRef.Config)
-		if err != nil {
-			log.Fatalf("Parse configuration file: %v", err)
+		if !fileutils2.Exists(optionsRef.Config) && !ignoreNoConfigfile {
+			log.Fatalf("Configuration file %s not exist", optionsRef.Config)
+		} else if fileutils2.Exists(optionsRef.Config) {
+			log.Infof("Use configuration file: %s", optionsRef.Config)
+			err = parser.ParseFile(optionsRef.Config)
+			if err != nil {
+				log.Fatalf("Parse configuration file: %v", err)
+			}
 		}
 	}
 
@@ -355,7 +381,7 @@ func ParseOptions(optStruct interface{}, args []string, configFileName string, s
 		h.Init()
 		log.DisableColors()
 		log.Logger().AddHook(h)
-		log.Logger().Out = ioutil.Discard
+		log.Logger().Out = io.Discard
 		atexit.Register(atexit.ExitHandler{
 			Prio:   atexit.PRIO_LOG_CLOSE,
 			Reason: "deinit log rotate hook",
@@ -371,7 +397,12 @@ func ParseOptions(optStruct interface{}, args []string, configFileName string, s
 		consts.SetRegion(optionsRef.Region)
 	}
 
+	consts.SetDefaultPolicy(optionsRef.EnableDefaultPolicy)
 	consts.SetDomainizedNamespace(optionsRef.DomainizedNamespace)
+
+	consts.SetTaskWorkerCount(optionsRef.TaskWorkerCount)
+	consts.SetLocalTaskWorkerCount(optionsRef.LocalTaskWorkerCount)
+	consts.SetTaskArchiveThresholdHours(optionsRef.TaskArchiveThresholdHours)
 }
 
 func (self *BaseOptions) HttpTransportProxyFunc() httputils.TransportProxyFunc {

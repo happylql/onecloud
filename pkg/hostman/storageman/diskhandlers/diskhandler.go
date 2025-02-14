@@ -24,6 +24,7 @@ import (
 	"yunion.io/x/log"
 	"yunion.io/x/pkg/errors"
 	"yunion.io/x/pkg/util/regutils"
+	"yunion.io/x/pkg/utils"
 
 	"yunion.io/x/onecloud/pkg/apis/compute"
 	"yunion.io/x/onecloud/pkg/appsrv"
@@ -41,15 +42,17 @@ var (
 	snapshotKeywords = []string{"snapshots"}
 
 	actionFuncs = map[string]actionFunc{
-		"create":            diskCreate,
-		"delete":            diskDelete,
-		"resize":            diskResize,
-		"save-prepare":      diskSavePrepare,
-		"reset":             diskReset,
-		"snapshot":          diskSnapshot,
-		"delete-snapshot":   diskDeleteSnapshot,
-		"cleanup-snapshots": diskCleanupSnapshots,
-		"backup":            diskBackup,
+		"create":              diskCreate,
+		"delete":              diskDelete,
+		"resize":              diskResize,
+		"save-prepare":        diskSavePrepare,
+		"reset":               diskReset,
+		"snapshot":            diskSnapshot,
+		"delete-snapshot":     diskDeleteSnapshot,
+		"cleanup-snapshots":   diskCleanupSnapshots,
+		"backup":              diskBackup,
+		"src-migrate-prepare": diskSrcMigratePrepare,
+		"migrate":             diskMigrate,
 	}
 )
 
@@ -115,10 +118,19 @@ func performImageCache(
 	if performAction == "perfetch" {
 		performTask = storagecache.PrefetchImageCache
 	} else {
-		performTask = storagecache.DeleteImageCache
+		if jsonutils.QueryBoolean(body, "deactivate_image", false) {
+			_, err := storagecache.DeleteImageCache(ctx, body)
+			if err != nil {
+				hostutils.Response(ctx, w, err)
+			}
+			hostutils.ResponseOk(ctx, w)
+			return
+		} else {
+			performTask = storagecache.DeleteImageCache
+		}
 	}
 
-	hostutils.DelayTask(ctx, performTask, disk)
+	hostutils.DelayImageCacheTask(ctx, performTask, disk)
 	hostutils.ResponseOk(ctx, w)
 }
 
@@ -128,7 +140,6 @@ func perfetchImageCache(ctx context.Context, w http.ResponseWriter, r *http.Requ
 
 func deleteImageCache(ctx context.Context, w http.ResponseWriter, r *http.Request) {
 	performImageCache(ctx, w, r, "delete")
-
 }
 
 func getDiskStatus(ctx context.Context, w http.ResponseWriter, r *http.Request) {
@@ -239,11 +250,13 @@ func performDiskActions(ctx context.Context, w http.ResponseWriter, r *http.Requ
 	var err error
 
 	rebuild, _ := body.Bool("disk", "rebuild")
-	if action != "create" || rebuild {
+	if !utils.IsInStringArray(action, []string{"create", "migrate"}) || rebuild {
 		disk, err = storage.GetDiskById(diskId)
 		if err != nil {
-			hostutils.Response(ctx, w, httperrors.NewGeneralError(errors.Wrapf(err, "GetDiskById(%s)", diskId)))
-			return
+			if errors.Cause(err) != cloudprovider.ErrNotFound || action != "delete" {
+				hostutils.Response(ctx, w, httperrors.NewGeneralError(errors.Wrapf(err, "GetDiskById(%s)", diskId)))
+				return
+			}
 		}
 	}
 
@@ -281,8 +294,14 @@ func diskCreate(ctx context.Context, userCred mcclient.TokenCredential, storage 
 
 func diskDelete(ctx context.Context, userCred mcclient.TokenCredential, storage storageman.IStorage, diskId string, disk storageman.IDisk, body jsonutils.JSONObject) (interface{}, error) {
 	flatPath, _ := body.GetString("esxi_flat_file_path")
+	input := compute.DiskDeleteInput{
+		EsxiFlatFilePath: flatPath,
+
+		// Only local storage support clean snapshots
+		CleanSnapshots: jsonutils.QueryBoolean(body, "clean_snapshots", false),
+	}
 	if disk != nil {
-		hostutils.DelayTask(ctx, disk.Delete, compute.DiskDeleteInput{EsxiFlatFilePath: flatPath})
+		hostutils.DelayTask(ctx, disk.Delete, input)
 	} else {
 		hostutils.DelayTask(ctx, nil, nil)
 	}
@@ -297,7 +316,7 @@ func diskResize(ctx context.Context, userCred mcclient.TokenCredential, storage 
 	serverId, _ := diskInfo.GetString("server_id")
 	if len(serverId) > 0 && guestman.GetGuestManager().Status(serverId) == "running" {
 		sizeMb, _ := diskInfo.Int("size")
-		return guestman.GetGuestManager().OnlineResizeDisk(ctx, serverId, diskId, sizeMb)
+		return guestman.GetGuestManager().OnlineResizeDisk(ctx, serverId, disk, sizeMb)
 	} else {
 		hostutils.DelayTask(ctx, disk.Resize, diskInfo)
 		return nil, nil
@@ -327,33 +346,70 @@ func diskReset(ctx context.Context, userCred mcclient.TokenCredential, storage s
 	return nil, nil
 }
 
+func diskSrcMigratePrepare(ctx context.Context, userCred mcclient.TokenCredential, storage storageman.IStorage, diskId string, disk storageman.IDisk, body jsonutils.JSONObject) (interface{}, error) {
+	snaps, back, hasTemplate, err := disk.PrepareMigrate(false)
+	if err != nil {
+		return nil, err
+	}
+	ret := jsonutils.NewDict()
+	if len(back) > 0 {
+		ret.Set("disk_back", jsonutils.NewString(back))
+	}
+	if len(snaps) > 0 {
+		ret.Set("disk_snaps_chain", jsonutils.NewStringArray(snaps))
+	}
+	if hasTemplate {
+		ret.Set("sys_disk_has_template", jsonutils.JSONTrue)
+	}
+	return ret, nil
+}
+
+func diskMigrate(ctx context.Context, userCred mcclient.TokenCredential, storage storageman.IStorage, diskId string, disk storageman.IDisk, body jsonutils.JSONObject) (interface{}, error) {
+	srcStorageId, _ := body.GetString("src_storage_id")
+	if srcStorageId == "" {
+		return nil, httperrors.NewMissingParameterError("src_storage_id")
+	}
+	snapshotsUri, _ := body.GetString("snapshots_uri")
+	if snapshotsUri == "" {
+		return nil, httperrors.NewMissingParameterError("snapshots_uri")
+	}
+	diskUri, _ := body.GetString("disk_uri")
+	if diskUri == "" {
+		return nil, httperrors.NewMissingParameterError("disk_uri")
+	}
+
+	templateId, _ := body.GetString("template_id")
+	sysDiskHasTemplate := jsonutils.QueryBoolean(body, "sys_disk_has_template", false)
+	diskBackingFile, _ := body.GetString("disk_back")
+
+	outChainSnaps, _ := body.GetArray("out_chain_snapshots")
+	diskSnapsChain, _ := body.GetArray("disk_snaps_chain")
+
+	params := storageman.SDiskMigrate{
+		DiskId:  diskId,
+		Disk:    disk,
+		Storage: storage,
+
+		DiskUri:            diskUri,
+		SnapshotsUri:       snapshotsUri,
+		SrcStorageId:       srcStorageId,
+		TemplateId:         templateId,
+		DiskBackingFile:    diskBackingFile,
+		SysDiskHasTemplate: sysDiskHasTemplate,
+
+		OutChainSnaps: outChainSnaps,
+		SnapsChain:    diskSnapsChain,
+	}
+	hostutils.DelayTask(ctx, storage.DiskMigrate, &params)
+	return nil, nil
+}
+
 func diskSnapshot(ctx context.Context, userCred mcclient.TokenCredential, storage storageman.IStorage, diskId string, disk storageman.IDisk, body jsonutils.JSONObject) (interface{}, error) {
 	snapshotId, err := body.GetString("snapshot_id")
 	if err != nil {
 		return nil, httperrors.NewMissingParameterError("snapshot_id")
 	}
-	hostutils.DelayTask(ctx, disk.DiskSnapshot, snapshotId)
-	return nil, nil
-}
-
-func diskStorageBackup(ctx context.Context, storage storageman.IStorage, diskId string, disk storageman.IDisk, body jsonutils.JSONObject) (interface{}, error) {
-	backupId, err := body.GetString("backup_id")
-	if err != nil {
-		return nil, httperrors.NewMissingParameterError("backup_id")
-	}
-	backupStorageId, err := body.GetString("backup_storage_id")
-	if err != nil {
-		return nil, httperrors.NewMissingParameterError("backup_storage_id")
-	}
-	backupStorageAccessInfo, err := body.Get("backup_storage_access_info")
-	if err != nil {
-		return nil, httperrors.NewMissingParameterError("backup_storage_access_info")
-	}
-	hostutils.DelayTask(ctx, storage.StorageBackup, &storageman.SStorageBackup{
-		BackupId:                backupId,
-		BackupStorageId:         backupStorageId,
-		BackupStorageAccessInfo: backupStorageAccessInfo.(*jsonutils.JSONDict),
-	})
+	hostutils.DelayBackupTask(ctx, disk.DiskSnapshot, snapshotId)
 	return nil, nil
 }
 
@@ -370,7 +426,7 @@ func diskStorageBackupRecovery(ctx context.Context, storage storageman.IStorage,
 	if err != nil {
 		return nil, httperrors.NewMissingParameterError("backup_storage_access_info")
 	}
-	hostutils.DelayTask(ctx, storage.StorageBackupRecovery, storageman.SStorageBackup{
+	hostutils.DelayBackupTask(ctx, storage.StorageBackupRecovery, storageman.SStorageBackup{
 		BackupId:                backupId,
 		BackupStorageId:         backupStorageId,
 		BackupStorageAccessInfo: backupStorageAccessInfo.(*jsonutils.JSONDict),
@@ -394,7 +450,7 @@ func diskBackup(ctx context.Context, userCred mcclient.TokenCredential, storage 
 		return nil, httperrors.NewMissingParameterError("backup_storage_id")
 	}
 	backupInfo.UserCred = userCred
-	hostutils.DelayTask(ctx, disk.DiskBackup, backupInfo)
+	hostutils.DelayBackupTask(ctx, disk.DiskBackup, backupInfo)
 	return nil, nil
 }
 

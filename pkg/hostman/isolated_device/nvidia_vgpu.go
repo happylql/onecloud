@@ -45,6 +45,10 @@ func (dev *sNVIDIAVgpuDevice) String() string {
 	return jsonutils.Marshal(dev).String()
 }
 
+func (dev *sNVIDIAVgpuDevice) IsInfinibandNic() bool {
+	return false
+}
+
 func (dev *sNVIDIAVgpuDevice) GetCloudId() string {
 	return dev.cloudId
 }
@@ -91,6 +95,22 @@ func (dev *sNVIDIAVgpuDevice) GetModelName() string {
 
 func (dev *sNVIDIAVgpuDevice) CustomProbe(idx int) error {
 	return nil
+}
+
+func (dev *sNVIDIAVgpuDevice) GetDevicePath() string {
+	return ""
+}
+
+func (dev *sNVIDIAVgpuDevice) GetNvidiaMpsMemoryLimit() int {
+	return -1
+}
+
+func (dev *sNVIDIAVgpuDevice) GetNvidiaMpsMemoryTotal() int {
+	return -1
+}
+
+func (dev *sNVIDIAVgpuDevice) GetNvidiaMpsThreadPercentage() int {
+	return -1
 }
 
 func (dev *sNVIDIAVgpuDevice) SetDeviceInfo(info CloudDeviceInfo) {
@@ -160,7 +180,16 @@ func (dev *sNVIDIAVgpuDevice) GetQemuId() string {
 	return "dev_" + dev.mdevId
 }
 
-func (dev *sNVIDIAVgpuDevice) GetHotPlugOptions(isolatedDev *desc.SGuestIsolatedDevice) ([]*HotPlugOption, error) {
+func (dev *sNVIDIAVgpuDevice) GetNumaNode() (int, error) {
+	numaNodePath := fmt.Sprintf("/sys/bus/pci/devices/0000:%s/numa_node", dev.GetAddr())
+	numaNode, err := fileutils2.FileGetIntContent(numaNodePath)
+	if err != nil {
+		return -1, errors.Wrap(err, "get device numa node")
+	}
+	return numaNode, nil
+}
+
+func (dev *sNVIDIAVgpuDevice) GetHotPlugOptions(isolatedDev *desc.SGuestIsolatedDevice, guestDesc *desc.SGuestDesc) ([]*HotPlugOption, error) {
 	ret := make([]*HotPlugOption, 0)
 
 	var masterDevOpt *HotPlugOption
